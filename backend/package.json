@@ -9,7 +9,9 @@
     "dev": "node --watch --env-file=.env src/server.js",
     "seed": "node scripts/seed.js",
     "test:sprint1": "node test-sprint1.js",
-    "test:sprint2:m1": "node test-sprint2-module1.js"
+    "test:sprint2:m1": "node test-sprint2-module1.js",
+    "qdrant:check": "node scripts/check-qdrant.js",
+    "qdrant:init": "node scripts/check-qdrant.js --init"
   },
   "keywords": [
     "ai",
