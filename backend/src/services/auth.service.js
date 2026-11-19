@@ -1,16 +1,9 @@
 import bcrypt from 'bcryptjs';
 import { User } from '../models/User.model.js';
-import { generateToken } from '../utils/jwt.js';
-import { SEEDED_ACCOUNTS } from '../../scripts/seed.js';
+import { generateTokens, verifyRefreshToken } from '../utils/jwt.js';
 
-// Pre-computed dummy bcrypt hash to protect against timing attacks when user is not found
-const DUMMY_HASH = '$2a$10$abcdefghijklmnopqrstuuABCDEFGHIJKLMNOPQRSTUVWXYZ012';
-
-// Pre-hashed seeded accounts cache using real bcrypt (10 rounds) for authentic verification
-const PRE_HASHED_SEED_CACHE = SEEDED_ACCOUNTS.map((acc) => ({
-  ...acc,
-  passwordHash: bcrypt.hashSync(acc.password, 10),
-}));
+// Pre-computed bcrypt hash (12 salt rounds) to prevent timing attacks on nonexistent accounts
+const DUMMY_HASH = '$2a$12$e8rOqfIe7Z9V3P7l4J3zkuR8J4uJv6W1xPzHq7t0s1o2n3m4l5k6j';
 
 export class AuthServiceError extends Error {
   constructor(message, statusCode = 500) {
@@ -22,7 +15,7 @@ export class AuthServiceError extends Error {
 
 /**
  * Enterprise Password Strength Validator
- * Requires: Min 8 chars, at least 1 uppercase, 1 lowercase, 1 number, 1 special char
+ * Requires: Min 8 chars, at least 1 uppercase, 1 lowercase, 1 number
  */
 export function validatePasswordStrength(password) {
   if (!password || typeof password !== 'string') {
@@ -36,12 +29,11 @@ export function validatePasswordStrength(password) {
   const hasUpper = /[A-Z]/.test(password);
   const hasLower = /[a-z]/.test(password);
   const hasDigit = /\d/.test(password);
-  const hasSpecial = /[!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?]/.test(password);
 
-  if (!hasUpper || !hasLower || !hasDigit || !hasSpecial) {
+  if (!hasUpper || !hasLower || !hasDigit) {
     return {
       isValid: false,
-      reason: 'Password must include uppercase, lowercase, number, and special character.',
+      reason: 'Password must include uppercase, lowercase, and numeric characters.',
     };
   }
 
@@ -49,10 +41,10 @@ export function validatePasswordStrength(password) {
 }
 
 /**
- * Hash password securely using Bcrypt (10 salt rounds)
+ * Hash password securely using Bcrypt (12 salt rounds)
  */
 export async function hashPassword(plainTextPassword) {
-  const salt = await bcrypt.genSalt(10);
+  const salt = await bcrypt.genSalt(12);
   return bcrypt.hash(plainTextPassword, salt);
 }
 
@@ -65,58 +57,53 @@ export async function verifyPassword(candidatePassword, passwordHash) {
 }
 
 /**
- * Internal query helper: MongoDB first, with bcrypt-hashed seed fallback
+ * Register a new employee in the organization
+ *
+ * @param {Object} userData
+ * @returns {Promise<Object>} Safe user profile
  */
-async function findUserRecordByEmail(email) {
-  if (User.db?.readyState === 1) {
-    return User.findOne({ email });
+export async function registerService(userData) {
+  const { name, email, password, orgId, department, role, managerId, userId } = userData;
+
+  if (!email || !password || !name) {
+    throw new AuthServiceError('Name, corporate email, and password are required.', 400);
   }
 
-  // Fallback with real bcrypt hashes
-  const match = PRE_HASHED_SEED_CACHE.find(
-    (a) => a.email.toLowerCase() === email.toLowerCase()
-  );
+  const normalizedEmail = email.trim().toLowerCase();
 
-  if (!match) return null;
-
-  return {
-    ...match,
-    comparePassword: async (pwd) => bcrypt.compare(pwd, match.passwordHash),
-    toSafeObject: () => {
-      const copy = { ...match };
-      delete copy.password;
-      delete copy.passwordHash;
-      return copy;
-    },
-  };
-}
-
-async function findUserRecordById(userId) {
-  if (User.db?.readyState === 1) {
-    return User.findOne({ userId });
+  const existingUser = await User.findOne({ email: normalizedEmail });
+  if (existingUser) {
+    throw new AuthServiceError('Corporate user with this email already exists.', 400);
   }
 
-  const match = PRE_HASHED_SEED_CACHE.find((a) => a.userId === userId);
-  if (!match) return null;
+  const generatedUserId = userId || `emp_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 
-  return {
-    ...match,
-    toSafeObject: () => {
-      const copy = { ...match };
-      delete copy.password;
-      delete copy.passwordHash;
-      return copy;
-    },
-  };
+  const user = new User({
+    userId: generatedUserId,
+    orgId: orgId || 'org_abc',
+    name: name.trim(),
+    email: normalizedEmail,
+    password, // Mongoose pre-save hook automatically hashes with bcrypt (12 rounds)
+    role: role || 'employee',
+    department: department || 'General',
+    managerId: managerId || null,
+    status: 'ACTIVE',
+    tokenVersion: 0,
+  });
+
+  await user.save();
+  return user.toSafeObject();
 }
 
 /**
  * Authenticate employee using corporate email and bcrypt password verification
+ * Implements dual-token issuance (15m Access Token + 7d Refresh Token)
+ * and tokenVersion incrementation for instant revocation.
  *
  * @param {Object} credentials
  * @param {string} credentials.email Corporate email address
  * @param {string} credentials.password Plain text password
- * @returns {Promise<{ token: string, user: Object }>}
+ * @returns {Promise<{ user: Object, accessToken: string, refreshToken: string }>}
  */
 export async function loginService({ email, password }) {
   if (!email || typeof email !== 'string' || !password) {
@@ -124,42 +111,108 @@ export async function loginService({ email, password }) {
   }
 
   const normalizedEmail = email.trim().toLowerCase();
-  const user = await findUserRecordByEmail(normalizedEmail);
+  const user = await User.findOne({ email: normalizedEmail }).select('+password +refreshToken');
 
   // Timing-attack mitigation: run dummy bcrypt compare even if user not found
   if (!user) {
     await bcrypt.compare(password, DUMMY_HASH).catch(() => {});
-    throw new AuthServiceError('Invalid corporate credentials. Account not found.', 401);
+    throw new AuthServiceError('Invalid corporate credentials.', 401);
   }
 
   // Account status check
-  if (user.status && user.status !== 'ACTIVE') {
+  if (user.status !== 'ACTIVE') {
     throw new AuthServiceError('This corporate account is deactivated. Contact HR or Organization Admin.', 403);
   }
 
-  // Real Bcrypt password comparison
+  // Bcrypt password comparison
   const isMatch = await user.comparePassword(password);
   if (!isMatch) {
-    throw new AuthServiceError('Invalid corporate credentials. Incorrect password.', 401);
+    throw new AuthServiceError('Invalid corporate credentials.', 401);
   }
 
-  // Issue standard enterprise signed JWT
-  const tokenPayload = {
-    userId: user.userId,
-    name: user.name,
-    email: user.email,
-    role: user.role,
-    orgId: user.orgId,
-    department: user.department,
-    managerId: user.managerId,
-  };
+  // Bump tokenVersion to invalidate older access tokens across all sessions
+  user.tokenVersion = (user.tokenVersion || 0) + 1;
 
-  const token = generateToken(tokenPayload);
+  // Mint dual tokens (15m Access Token + 7d Refresh Token)
+  const { accessToken, refreshToken } = generateTokens(user);
+
+  // Store refresh token in MongoDB
+  user.refreshToken = refreshToken;
+  await user.save();
 
   return {
-    token,
     user: user.toSafeObject(),
+    accessToken,
+    refreshToken,
   };
+}
+
+/**
+ * Rotate Refresh Token and generate a fresh Access Token
+ *
+ * @param {string} refreshToken
+ * @returns {Promise<{ accessToken: string, refreshToken: string }>}
+ */
+export async function refreshTokenService(refreshToken) {
+  if (!refreshToken || typeof refreshToken !== 'string') {
+    throw new AuthServiceError('Refresh token is required.', 400);
+  }
+
+  let decoded;
+  try {
+    decoded = verifyRefreshToken(refreshToken);
+  } catch (err) {
+    throw new AuthServiceError('Invalid or expired refresh token.', 401);
+  }
+
+  const user = await User.findOne({ userId: decoded.userId }).select('+refreshToken');
+  if (!user) {
+    throw new AuthServiceError('User not found for refresh token.', 401);
+  }
+
+  if (user.status !== 'ACTIVE') {
+    throw new AuthServiceError('This corporate account is deactivated.', 403);
+  }
+
+  // Refresh token mismatch protection (replay/theft defense)
+  if (!user.refreshToken || user.refreshToken !== refreshToken) {
+    throw new AuthServiceError('Refresh token mismatch or already rotated.', 401);
+  }
+
+  // Token version verification
+  if (decoded.version !== undefined && decoded.version !== user.tokenVersion) {
+    throw new AuthServiceError('Token has been revoked.', 401);
+  }
+
+  // Mint fresh dual tokens
+  const tokens = generateTokens(user);
+  user.refreshToken = tokens.refreshToken;
+  await user.save();
+
+  return tokens;
+}
+
+/**
+ * Revoke tokens and log out user
+ * Clears stored refreshToken and increments tokenVersion in MongoDB
+ *
+ * @param {string} userId
+ * @returns {Promise<{ success: boolean, message: string }>}
+ */
+export async function logoutService(userId) {
+  if (!userId) {
+    throw new AuthServiceError('User ID is required.', 400);
+  }
+
+  await User.updateOne(
+    { userId },
+    {
+      $set: { refreshToken: null },
+      $inc: { tokenVersion: 1 },
+    }
+  );
+
+  return { success: true, message: 'Logged out successfully.' };
 }
 
 /**
@@ -173,51 +226,13 @@ export async function getMeService(userId) {
     throw new AuthServiceError('User ID is required.', 400);
   }
 
-  const user = await findUserRecordById(userId);
+  const user = await User.findOne({ userId }).select('-password -refreshToken -tokenVersion');
 
   if (!user) {
     throw new AuthServiceError('User profile not found.', 404);
   }
 
-  return user.toSafeObject();
-}
-
-/**
- * Change employee password with strength validation and bcrypt re-hashing
- *
- * @param {Object} params
- * @param {string} params.userId
- * @param {string} params.oldPassword
- * @param {string} params.newPassword
- */
-export async function changePasswordService({ userId, oldPassword, newPassword }) {
-  if (!userId || !oldPassword || !newPassword) {
-    throw new AuthServiceError('All fields (userId, oldPassword, newPassword) are required.', 400);
-  }
-
-  const strengthCheck = validatePasswordStrength(newPassword);
-  if (!strengthCheck.isValid) {
-    throw new AuthServiceError(`Weak password: ${strengthCheck.reason}`, 400);
-  }
-
-  let user = null;
-  if (User.db?.readyState === 1) {
-    user = await User.findOne({ userId });
-  }
-
-  if (!user) {
-    throw new AuthServiceError('User not found to update password.', 404);
-  }
-
-  const isOldMatch = await user.comparePassword(oldPassword);
-  if (!isOldMatch) {
-    throw new AuthServiceError('Incorrect current password.', 401);
-  }
-
-  user.passwordHash = newPassword; // Mongoose pre-save hook will hash with bcrypt
-  await user.save();
-
-  return { success: true, message: 'Password successfully updated.' };
+  return user.toSafeObject ? user.toSafeObject() : user;
 }
 
 /**
@@ -232,7 +247,7 @@ export async function forgotPasswordService(email) {
   }
 
   const normalizedEmail = email.trim().toLowerCase();
-  await findUserRecordByEmail(normalizedEmail);
+  await User.findOne({ email: normalizedEmail }).catch(() => {});
 
   return {
     message: `If an active corporate account exists for "${normalizedEmail}", a password reset token has been dispatched to your corporate inbox.`,

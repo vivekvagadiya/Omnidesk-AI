@@ -25,10 +25,12 @@ export const config = {
     url: process.env.QDRANT_URL,
   },
 
-  // Auth & Security
+  // Auth & Dual JWT Tokens
   jwt: {
-    secret: process.env.JWT_SECRET,
-    expiresIn: process.env.JWT_EXPIRES_IN || '7d',
+    secret: process.env.JWT_SECRET || 'omnidesk-enterprise-access-token-secret-2026',
+    refreshSecret: process.env.JWT_REFRESH_SECRET || 'omnidesk-enterprise-refresh-token-secret-2026',
+    accessExpiresIn: process.env.JWT_ACCESS_EXPIRES_IN || '15m',
+    refreshExpiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '7d',
   },
 
   // AI & External APIs

@@ -38,9 +38,19 @@ const userSchema = new mongoose.Schema(
       lowercase: true,
       index: true,
     },
-    passwordHash: {
+    password: {
       type: String,
       required: true,
+      select: false, // Never returned in normal queries
+    },
+    tokenVersion: {
+      type: Number,
+      default: 0,
+    },
+    refreshToken: {
+      type: String,
+      default: null,
+      select: false, // Hidden by default
     },
     role: {
       type: String,
@@ -76,28 +86,36 @@ const userSchema = new mongoose.Schema(
   }
 );
 
-// Pre-save hook: hash password before saving if modified
+// Pre-save hook: Hash password with 12 salt rounds before saving
 userSchema.pre('save', async function (next) {
-  if (!this.isModified('passwordHash')) return next();
+  if (!this.isModified('password')) {
+    if (typeof next === 'function') return next();
+    return;
+  }
 
   try {
-    const salt = await bcrypt.genSalt(10);
-    this.passwordHash = await bcrypt.hash(this.passwordHash, salt);
-    next();
+    const salt = await bcrypt.genSalt(12);
+    this.password = await bcrypt.hash(this.password, salt);
+    if (typeof next === 'function') next();
   } catch (err) {
-    next(err);
+    if (typeof next === 'function') next(err);
+    else throw err;
   }
 });
 
-// Instance method to compare password
+// Instance method to compare password securely
 userSchema.methods.comparePassword = async function (candidatePassword) {
-  return bcrypt.compare(candidatePassword, this.passwordHash);
+  if (!candidatePassword || !this.password) return false;
+  return bcrypt.compare(candidatePassword, this.password);
 };
 
-// Safe JSON serialization (strip passwordHash)
+// Safe JSON serialization (strips sensitive fields)
 userSchema.methods.toSafeObject = function () {
-  const obj = this.toObject();
-  delete obj.passwordHash;
+  const obj = typeof this.toObject === 'function' ? this.toObject() : { ...this };
+  delete obj.password;
+  delete obj.refreshToken;
+  delete obj.tokenVersion;
+  delete obj.__v;
   return obj;
 };
 

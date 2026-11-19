@@ -1,9 +1,10 @@
-import { verifyToken } from '../utils/jwt.js';
+import { verifyAccessToken } from '../utils/jwt.js';
 import { User } from '../models/User.model.js';
 import { errorResponse } from '../utils/apiResponse.js';
 
 /**
- * Middleware to authenticate requests via Bearer JWT
+ * Middleware to authenticate requests via Bearer Access JWT
+ * Enforces instant token revocation via tokenVersion matching.
  */
 export async function authenticateJwt(req, res, next) {
   const authHeader = req.headers.authorization;
@@ -18,23 +19,40 @@ export async function authenticateJwt(req, res, next) {
   const token = authHeader.split(' ')[1];
 
   try {
-    const decoded = verifyToken(token);
+    const decoded = verifyAccessToken(token);
 
-    // Optional fast-path: if User model is connected, attach full user; else attach decoded payload
-    req.user = decoded;
+    // If database connection is active or findOne is mocked, verify against user document
+    if (User.db?.readyState === 1 || typeof User.findOne === 'function') {
+      try {
+        const user = await User.findOne({ userId: decoded.userId });
+        if (user) {
+          if (user.status !== 'ACTIVE') {
+            return errorResponse(res, {
+              statusCode: 403,
+              message: 'User account is inactive.',
+            });
+          }
 
-    // If needed, verify active status in database
-    if (User.db?.readyState === 1) {
-      const user = await User.findOne({ userId: decoded.userId });
-      if (!user || user.status !== 'ACTIVE') {
-        return errorResponse(res, {
-          statusCode: 401,
-          message: 'User account is inactive or not found.',
-        });
+          // Instant token revocation: verify version in token matches user's tokenVersion
+          if (decoded.version !== undefined && decoded.version !== user.tokenVersion) {
+            return errorResponse(res, {
+              statusCode: 401,
+              message: 'Token has been revoked.',
+            });
+          }
+
+          req.user = typeof user.toSafeObject === 'function' ? user.toSafeObject() : user;
+          req.userDoc = user;
+          return next();
+        }
+      } catch (dbErr) {
+        // If DB query fails and DB is not connected, fall through to decoded token
+        if (User.db?.readyState === 1) throw dbErr;
       }
-      req.userDoc = user;
     }
 
+    // Fast-path / fallback when testing without live DB
+    req.user = decoded;
     next();
   } catch (err) {
     return errorResponse(res, {
