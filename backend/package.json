@@ -1,0 +1,38 @@
+{
+  "name": "omnidesk-backend",
+  "version": "1.0.0",
+  "description": "OmniDesk AI — Enterprise IT & HR Operations Copilot Backend",
+  "main": "src/server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch --env-file=.env src/server.js",
+    "seed": "node scripts/seed.js",
+    "test:sprint1": "node test-sprint1.js"
+  },
+  "keywords": [
+    "ai",
+    "copilot",
+    "express",
+    "mongoose",
+    "qdrant",
+    "redis",
+    "rag"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@google/genai": "^2.32.0",
+    "@qdrant/js-client-rest": "^1.20.0",
+    "bcryptjs": "^3.0.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "helmet": "^8.0.0",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^8.12.1",
+    "morgan": "^1.10.0",
+    "redis": "^4.7.0",
+    "zod": "^3.24.2"
+  }
+}

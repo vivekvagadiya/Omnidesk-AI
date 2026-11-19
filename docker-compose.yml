@@ -1,0 +1,46 @@
+services:
+  # MongoDB — Primary Database (Users, Roles, Tickets, Assets)
+  mongodb:
+    image: mongo:7.0
+    container_name: omnidesk-mongodb
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - omnidesk-network
+
+  # Redis — In-Memory Cache, Chat Sessions & Queue Worker
+  redis:
+    image: redis:7-alpine
+    container_name: omnidesk-redis
+    restart: unless-stopped
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - omnidesk-network
+
+  # Qdrant — Vector Database for HR & IT Policies (RAG Engine)
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: omnidesk-qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    networks:
+      - omnidesk-network
+
+volumes:
+  mongodb_data:
+  redis_data:
+  qdrant_data:
+
+networks:
+  omnidesk-network:
+    driver: bridge
