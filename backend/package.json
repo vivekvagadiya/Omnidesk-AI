@@ -10,6 +10,7 @@
     "seed": "node scripts/seed.js",
     "test:sprint1": "node test-sprint1.js",
     "test:sprint2:m1": "node test-sprint2-module1.js",
+    "test:sprint2:m2": "node test-sprint2-module2.js",
     "qdrant:check": "node scripts/check-qdrant.js",
     "qdrant:init": "node scripts/check-qdrant.js --init"
   },
@@ -35,6 +36,7 @@
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.12.1",
     "morgan": "^1.10.0",
+    "pdf-parse": "^2.4.5",
     "redis": "^4.7.0",
     "zod": "^3.24.2"
   }
