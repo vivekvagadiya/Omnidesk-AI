@@ -3,6 +3,7 @@ import { config } from '../../config/environment.js';
 import { getRedisClient } from '../../config/redis.js';
 import { retrievePolicyContext } from '../rag/retrieval.service.js';
 import { packageResponseWithCitations } from '../rag/citation.service.js';
+import { maskPII, unmaskPII } from './piiMasker.service.js';
 
 export const PRIMARY_MODEL = 'gemini-3.8-flash';
 export const FALLBACK_MODEL = 'gemini-3.5-flash';
@@ -211,33 +212,37 @@ export async function runCopilotTurn({
     throw new Error('Authenticated user context with orgId is required.');
   }
 
-  // 1. Load Multi-Turn History from Redis
+  // 1. Pre-LLM PII Masking (Surrogate Tokenization Guardrail)
+  const { maskedText, tokenMap, hasPII } = maskPII(message);
+
+  // 2. Load Multi-Turn History from Redis
   const historyTurns = await getSessionHistory(sessionId);
 
-  // 2. Perform Evidence-Based RAG Retrieval (with Zero-Hallucination Guardrail)
+  // 3. Perform Evidence-Based RAG Retrieval (with Zero-Hallucination Guardrail)
   const retrievalResult = await retrievePolicyContext({
-    query: message,
+    query: maskedText, // Query using sanitized text
     user,
     embeddingProvider: customEmbeddingProvider,
     qdrantClient,
   });
 
-  // 3. Assemble System Prompt with Role Boundaries & Policy Context
+  // 4. Assemble System Prompt with Role Boundaries & Policy Context
   const systemInstruction = buildSystemInstructions({
     user,
     evidenceContext: retrievalResult.contextBlock,
   });
 
-  // 4. Generate LLM Response
+  // 5. Generate LLM Response
   let responseText = '';
 
   if (typeof customLlmProvider === 'function') {
     // Custom/Mock LLM path for deterministic testing
     responseText = await customLlmProvider({
-      message,
+      message: maskedText,
       history: historyTurns,
       systemInstruction,
       retrievalResult,
+      tokenMap,
     });
   } else {
     // Production Gemini API execution
@@ -254,7 +259,7 @@ export async function runCopilotTurn({
     }));
     contents.push({
       role: 'user',
-      parts: [{ text: message }],
+      parts: [{ text: maskedText }],
     });
 
     try {
@@ -295,22 +300,27 @@ export async function runCopilotTurn({
     responseText = retrievalResult.fallbackMessage;
   }
 
-  // 5. Package Citations and Map References
+  // 6. Post-LLM De-Tokenization: Restore raw values from surrogate tokens
+  const unmaskedAnswer = hasPII ? unmaskPII(responseText, tokenMap) : responseText;
+
+  // 7. Package Citations and Map References
   const packaged = packageResponseWithCitations({
-    answerText: responseText,
+    answerText: unmaskedAnswer,
     chunks: retrievalResult.chunks,
     query: message,
   });
 
-  // 6. Append Turns to Redis Session Memory
+  // 8. Append Turns to Redis Session Memory
   await appendSessionMessage(sessionId, { role: 'user', text: message });
-  await appendSessionMessage(sessionId, { role: 'model', text: responseText });
+  await appendSessionMessage(sessionId, { role: 'model', text: unmaskedAnswer });
 
   return {
     sessionId,
-    answer: responseText,
+    answer: unmaskedAnswer,
     isGrounded: retrievalResult.isGrounded,
     hasCitations: packaged.hasCitations,
+    hasPII,
+    piiMasked: hasPII,
     citations: packaged.citations,
     activeCitations: packaged.activeCitations,
     suggestedAction: retrievalResult.suggestedAction || null,
