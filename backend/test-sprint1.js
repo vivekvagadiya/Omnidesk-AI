@@ -4,6 +4,7 @@ import { Ticket } from './src/models/Ticket.model.js';
 import { Asset } from './src/models/Asset.model.js';
 import { generateToken, verifyToken } from './src/utils/jwt.js';
 import { requireRoles, requireSameOrg } from './src/middlewares/auth.middleware.js';
+import { hashPassword, verifyPassword, validatePasswordStrength } from './src/services/auth.service.js';
 import bcrypt from 'bcryptjs';
 
 console.log('================================================================');
@@ -61,9 +62,29 @@ assert(
 );
 
 // =============================================================
-// TEST SUITE 2: Password Security & Bcrypt Hashing
+// TEST SUITE 2: Password Security & Bcrypt Validation
 // =============================================================
 console.log('\n--- Suite 2: Password Security & Bcrypt Validation ---');
+
+// 2.1: Password strength enforcement
+const strongCheck = validatePasswordStrength('ComplexPass123!');
+const weakCheck = validatePasswordStrength('simple');
+assert(strongCheck.isValid === true, 'validatePasswordStrength accepts compliant enterprise password');
+assert(weakCheck.isValid === false, 'validatePasswordStrength rejects weak non-compliant password');
+console.log('    ↳ Password strength checks: "ComplexPass123!" ->', strongCheck.isValid, '| "simple" ->', weakCheck.isValid, `(${weakCheck.reason})`);
+
+// 2.2: Pure Bcrypt hashing and comparison
+const dynamicHash = await hashPassword('SecretTest2026!');
+assert(
+  typeof dynamicHash === 'string' && (dynamicHash.startsWith('$2a$') || dynamicHash.startsWith('$2b$')),
+  'hashPassword securely encodes passwords using bcrypt 10 salt rounds ($2a$ / $2b$)'
+);
+const validVerify = await verifyPassword('SecretTest2026!', dynamicHash);
+const invalidVerify = await verifyPassword('BadGuess999!', dynamicHash);
+assert(validVerify === true, 'verifyPassword confirms genuine bcrypt password match');
+assert(invalidVerify === false, 'verifyPassword rejects spoofed password match');
+console.log('    ↳ Bcrypt hash output      :', dynamicHash.substring(0, 28) + '...');
+console.log('    ↳ Bcrypt verify check     : Valid ->', validVerify, '| Invalid ->', invalidVerify);
 
 const rawPassword = 'EmployeePassword123!';
 const salt = bcrypt.genSaltSync(10);
@@ -89,10 +110,10 @@ const isCorrect = await correctMatch;
 const isWrong = await wrongMatch;
 
 assert(isCorrect === true, 'comparePassword correctly validates authentic password');
-console.log(`    ↳ Valid password check   : ${isCorrect} (Matches hashed bcrypt salt)`);
+console.log(`    ↳ Model valid password    : ${isCorrect} (Matches hashed bcrypt salt)`);
 
 assert(isWrong === false, 'comparePassword strictly rejects incorrect password');
-console.log(`    ↳ Invalid password check : ${isWrong} (Blocked securely)`);
+console.log(`    ↳ Model invalid password  : ${isWrong} (Blocked securely)`);
 
 // Safe object check (no password leakage)
 const safeUser = mockUser.toSafeObject();
@@ -100,7 +121,7 @@ assert(
   safeUser.passwordHash === undefined && safeUser.userId === 'emp_101',
   'toSafeObject sanitizes sensitive passwordHash from API responses'
 );
-console.log('    ↳ Sanitized User Payload :', JSON.stringify({ userId: safeUser.userId, email: safeUser.email, role: safeUser.role, managerId: safeUser.managerId }));
+console.log('    ↳ Sanitized User Payload  :', JSON.stringify({ userId: safeUser.userId, email: safeUser.email, role: safeUser.role, managerId: safeUser.managerId }));
 
 // =============================================================
 // TEST SUITE 3: Signed JWT Tokens & Claims Validation
