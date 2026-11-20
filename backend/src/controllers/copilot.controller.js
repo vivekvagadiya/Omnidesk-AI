@@ -41,12 +41,16 @@ export async function streamChat(req, res, next) {
     ? sessionId.trim()
     : `sess_${user.userId}`;
 
+  console.log(`\n💬 [Copilot Chat] User: ${user.name || user.userId} (${user.role}) | Session: ${activeSessionId}`);
+  console.log(`💬 [Copilot Chat] Prompt: "${message.trim()}"`);
+
   // Initialize SSE connection headers
   initSSE(res);
 
   let isAborted = false;
   req.on('close', () => {
     isAborted = true;
+    console.log(`⚠️  [Copilot Chat] Client disconnected / aborted SSE connection for session: ${activeSessionId}`);
   });
 
   try {
@@ -56,12 +60,18 @@ export async function streamChat(req, res, next) {
       user,
       onEvent: (event, data) => {
         if (!isAborted) {
+          if (event === 'token') {
+            process.stdout.write(data?.delta || '');
+          } else {
+            console.log(`\n📡 [SSE Event: ${event}]`, typeof data === 'object' ? JSON.stringify(data).substring(0, 120) : data);
+          }
           sendSSE(res, event, data);
         }
       },
       explicitToolCall: toolCall || null,
     });
   } catch (err) {
+    console.error(`\n❌ [Copilot Chat] Error during stream:`, err.message);
     if (!res.headersSent) {
       return errorResponse(res, {
         statusCode: 500,
@@ -74,6 +84,7 @@ export async function streamChat(req, res, next) {
       code: 'COPILOT_STREAM_ERROR',
     });
   } finally {
+    console.log(`\n🏁 [Copilot Chat] Stream completed & closed for session: ${activeSessionId}\n`);
     closeSSE(res);
   }
 }

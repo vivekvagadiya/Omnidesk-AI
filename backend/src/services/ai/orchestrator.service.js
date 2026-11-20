@@ -10,8 +10,8 @@ import {
   CONSEQUENTIAL_TOOLS,
 } from '../tools/toolRegistry.service.js';
 
-export const PRIMARY_MODEL = 'gemini-3.8-flash';
-export const FALLBACK_MODEL = 'gemini-3.5-flash';
+export const PRIMARY_MODEL = 'gemini-2.5-flash';
+export const FALLBACK_MODEL = 'gemini-2.0-flash';
 
 export const SESSION_TTL_SECONDS = 86400; // 24-hour session TTL
 export const MAX_SESSION_MESSAGES = 20; // Last 10 turns (user + assistant)
@@ -567,7 +567,11 @@ export async function streamCopilotTurn({
         parts: [{ text: maskedText }],
       });
 
+      let llmSucceeded = false;
+
+      // Try primary Gemini model
       try {
+        console.log(`📡 [Orchestrator] Calling Gemini API (Model: ${PRIMARY_MODEL})...`);
         const stream = await ai.models.generateContentStream({
           model: PRIMARY_MODEL,
           contents,
@@ -584,33 +588,56 @@ export async function streamCopilotTurn({
             onEvent('token', { delta });
           }
         }
+        llmSucceeded = true;
       } catch (streamErr) {
-        console.warn(`⚠️ [Orchestrator Stream] Primary model error: ${streamErr.message}. Falling back...`);
-        const fallbackStream = await ai.models.generateContentStream({
-          model: FALLBACK_MODEL,
-          contents,
-          config: {
-            systemInstruction,
-            temperature: 0.2,
-          },
-        });
+        console.warn(`⚠️ [Orchestrator Stream] Primary model (${PRIMARY_MODEL}) error: ${streamErr.message}. Trying fallback...`);
+      }
 
-        for await (const chunk of fallbackStream) {
-          const delta = typeof chunk.text === 'function' ? chunk.text() : chunk.text || '';
-          if (delta) {
-            accumulatedText += delta;
-            onEvent('token', { delta });
+      // Try fallback Gemini model if primary failed
+      if (!llmSucceeded) {
+        try {
+          console.log(`📡 [Orchestrator] Retrying Gemini API with fallback model (${FALLBACK_MODEL})...`);
+          const fallbackStream = await ai.models.generateContentStream({
+            model: FALLBACK_MODEL,
+            contents,
+            config: {
+              systemInstruction,
+              temperature: 0.2,
+            },
+          });
+
+          for await (const chunk of fallbackStream) {
+            const delta = typeof chunk.text === 'function' ? chunk.text() : chunk.text || '';
+            if (delta) {
+              accumulatedText += delta;
+              onEvent('token', { delta });
+            }
           }
+          llmSucceeded = true;
+        } catch (fallbackErr) {
+          console.warn(`⚠️ [Orchestrator Stream] Fallback model (${FALLBACK_MODEL}) error: ${fallbackErr.message}.`);
         }
       }
-    }
 
-    // Zero-hallucination guardrail check
-    if (!retrievalResult?.isGrounded && (!accumulatedText || accumulatedText.length < 5)) {
-      accumulatedText =
-        retrievalResult?.fallbackMessage ||
-        'No company policy covers this topic. Would you like me to raise an HR or IT ticket for assistance?';
-      onEvent('token', { delta: accumulatedText });
+      // Zero-Hang Resilient Synthesizer:
+      // If external Gemini API is unreachable, offline, rate-limited, or blocked,
+      // synthesize directly from retrieved verified policy evidence so user NEVER hangs!
+      if (!llmSucceeded || !accumulatedText || accumulatedText.trim().length === 0) {
+        if (retrievalResult?.isGrounded && retrievalResult?.chunks?.length > 0) {
+          console.log(`ℹ️  [Orchestrator] Synthesizing answer directly from ${retrievalResult.chunks.length} verified evidence chunks.`);
+          const topChunk = retrievalResult.chunks[0];
+          accumulatedText = `According to ABC Technologies verified policy [1] (§ ${topChunk.sectionTitle}):\n\n${topChunk.text}`;
+          if (retrievalResult.chunks.length > 1) {
+            accumulatedText += `\n\nAdditionally, [2] (§ ${retrievalResult.chunks[1].sectionTitle}):\n${retrievalResult.chunks[1].text}`;
+          }
+          onEvent('token', { delta: accumulatedText });
+        } else {
+          accumulatedText =
+            retrievalResult?.fallbackMessage ||
+            'No company policy covers this topic. Would you like me to raise an HR or IT ticket for assistance?';
+          onEvent('token', { delta: accumulatedText });
+        }
+      }
     }
 
     // Package citations

@@ -149,6 +149,8 @@ export function CopilotProvider({ children }) {
         message: text,
         sessionId,
         onEvent: (event, payload) => {
+          console.log(`[Copilot SSE] Event: ${event}`, payload);
+
           if (event === 'tool_call') {
             setActiveToolPill({
               tool: payload.tool,
@@ -204,15 +206,18 @@ export function CopilotProvider({ children }) {
             });
           } else if (event === 'done') {
             setActiveToolPill(null);
+            setIsStreaming(false);
           } else if (event === 'error') {
+            setActiveToolPill(null);
+            setIsStreaming(false);
             setMessages((prev) =>
               prev.map((msg) =>
                 msg.id === assistantMessageId
                   ? {
                       ...msg,
                       text:
-                        msg.text +
-                        `\n\n*(Error: ${payload.message || 'Stream turn encountered an issue.'})*`,
+                        (msg.text ? msg.text + '\n\n' : '') +
+                        `*(Error: ${payload.message || 'Stream turn encountered an issue.'})*`,
                     }
                   : msg
               )

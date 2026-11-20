@@ -167,7 +167,11 @@ export function ChatContainer() {
                     <Loader2 className="w-3.5 h-3.5 animate-spin" />
                     <span>Thinking...</span>
                   </div>
-                ) : null}
+                ) : (
+                  <div className="text-zinc-500 italic text-[11px] py-1">
+                    No response text received.
+                  </div>
+                )}
 
                 {/* Staged Consequential Action Card */}
                 {msg.stagedAction && (
