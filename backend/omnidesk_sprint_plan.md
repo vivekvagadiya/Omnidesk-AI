@@ -266,11 +266,11 @@ Build the production React single-page application (Vite + Tailwind CSS) tightly
 
 ### Definition of Done (Acceptance Criteria):
 
-- [ ] Logging in as Sarah (Employee) or Marcus (Admin) displays their specific identity, leave balances, and tickets.
-- [ ] Asking a policy question streams Gemini response tokens in real-time with pulsing tool status pills.
-- [ ] In-text citation badges (`[1]`, `[2]`) open the right-side evidence drawer displaying exact Qdrant text and confidence scores.
-- [ ] Asking to apply for leave renders the HITL Staged Action Card; clicking "Approve" deducts the balance live on the Left Panel.
-- [ ] Document dropzone uploads a policy file to `POST /api/copilot/documents` and confirms vector indexing into Qdrant.
+- [x] Logging in as Sarah (Employee) or Marcus (Admin) displays their specific identity, leave balances, and tickets.
+- [x] Asking a policy question streams Gemini response tokens in real-time with pulsing tool status pills.
+- [x] In-text citation badges (`[1]`, `[2]`) open the right-side evidence drawer displaying exact Qdrant text and confidence scores.
+- [x] Asking to apply for leave renders the HITL Staged Action Card; clicking "Approve" deducts the balance live on the Left Panel.
+- [x] Document dropzone uploads a policy file to `POST /api/copilot/documents` and confirms vector indexing into Qdrant.
 
 ---
 
