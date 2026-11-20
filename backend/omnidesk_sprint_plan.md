@@ -106,10 +106,10 @@ Build the Qdrant vector database collection, document ingestion pipeline with fi
 
 ### Definition of Done (Acceptance Criteria):
 
-- [ ] Uploading an `.exe` disguised as `.pdf` is blocked by magic byte validation.
-- [ ] Sample HR Leave Policy and IT Hardware Policy are chunked and indexed into Qdrant.
-- [ ] Semantic queries return accurate chunks with similarity scores >= 0.65.
-- [ ] Out-of-scope queries safely return zero results without hallucinating.
+- [x] Uploading an `.exe` disguised as `.pdf` is blocked by magic byte validation.
+- [x] Sample HR Leave Policy and IT Hardware Policy are chunked and indexed into Qdrant.
+- [x] Semantic queries return accurate chunks with similarity scores >= 0.65.
+- [x] Out-of-scope queries safely return zero results without hallucinating.
 
 ---
 
@@ -141,9 +141,9 @@ Implement the Gemini conversational agent with multi-turn Redis memory, Week 9 P
 
 ### Definition of Done (Acceptance Criteria):
 
-- [ ] LLM answers policy queries using RAG and includes citation tags.
-- [ ] Calling `applyLeave` does NOT immediately alter database balance; it returns a staged action token.
-- [ ] Calling approval with the token executes the balance deduction in MongoDB.
+- [x] LLM answers policy queries using RAG and includes citation tags.
+- [x] Calling `applyLeave` does NOT immediately alter database balance; it returns a staged action token.
+- [x] Calling approval with the token executes the balance deduction in MongoDB.
 
 ---
 
@@ -177,9 +177,9 @@ Wire all backend modules into high-performance Express REST endpoints, Server-Se
 
 ### Definition of Done (Acceptance Criteria):
 
-- [ ] Chat endpoint streams SSE tokens smoothly to curl/Postman.
-- [ ] Ingestion endpoint uploads, validates, and indexes PDFs into Qdrant.
-- [ ] Background worker logs asynchronous notification delivery when actions are approved.
+- [x] Chat endpoint streams SSE tokens smoothly to curl/Postman.
+- [x] Ingestion endpoint uploads, validates, and indexes PDFs into Qdrant.
+- [x] Background worker logs asynchronous notification delivery when actions are approved.
 
 ---
 

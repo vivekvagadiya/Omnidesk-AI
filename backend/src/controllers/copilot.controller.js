@@ -8,6 +8,10 @@ import {
   ActionExpiredError,
   UnauthorizedActionError,
 } from '../services/tools/hitlGatekeeper.service.js';
+import {
+  ingestDocument,
+  IngestionValidationError,
+} from '../services/rag/ingestion.service.js';
 import { successResponse, errorResponse } from '../utils/apiResponse.js';
 import { getRedisClient } from '../config/redis.js';
 
@@ -231,6 +235,77 @@ export async function getActionDetails(req, res) {
     return errorResponse(res, {
       statusCode: 500,
       message: err.message || 'Failed to retrieve staged action.',
+    });
+  }
+}
+
+/**
+ * Controller: Upload and Ingest Document
+ * POST /api/copilot/documents
+ */
+export async function uploadDocument(req, res) {
+  const user = req.user;
+
+  if (!user || !user.orgId) {
+    return errorResponse(res, {
+      statusCode: 401,
+      message: 'Unauthorized: Valid user credentials required.',
+    });
+  }
+
+  if (!req.file) {
+    return errorResponse(res, {
+      statusCode: 400,
+      message: "No document file provided. Please attach a file using the 'file' form-data field.",
+    });
+  }
+
+  const { department, allowedRoles } = req.body;
+  const targetDepartment = department?.trim() || user.department || 'GENERAL';
+
+  let parsedRoles = ['employee', 'manager', 'hr_admin', 'it_admin', 'org_admin'];
+  if (allowedRoles) {
+    if (Array.isArray(allowedRoles)) {
+      parsedRoles = allowedRoles;
+    } else if (typeof allowedRoles === 'string') {
+      try {
+        const jsonParsed = JSON.parse(allowedRoles);
+        if (Array.isArray(jsonParsed)) parsedRoles = jsonParsed;
+        else parsedRoles = allowedRoles.split(',').map((r) => r.trim()).filter(Boolean);
+      } catch {
+        parsedRoles = allowedRoles.split(',').map((r) => r.trim()).filter(Boolean);
+      }
+    }
+  }
+
+  try {
+    const result = await ingestDocument({
+      buffer: req.file.buffer,
+      filename: req.file.originalname,
+      mimeType: req.file.mimetype,
+      orgId: user.orgId,
+      department: targetDepartment,
+      allowedRoles: parsedRoles,
+      testEmbeddingProvider: req.testEmbeddingProvider || req.app?.locals?.testEmbeddingProvider || null,
+      qdrantClient: req.qdrantClient || req.app?.locals?.qdrantClient || null,
+    });
+
+    return successResponse(res, {
+      statusCode: 201,
+      message: 'Document successfully ingested and indexed into vector database.',
+      data: result,
+    });
+  } catch (err) {
+    if (err instanceof IngestionValidationError) {
+      return errorResponse(res, {
+        statusCode: err.statusCode || 400,
+        message: err.message,
+      });
+    }
+
+    return errorResponse(res, {
+      statusCode: 500,
+      message: err.message || 'An error occurred during document ingestion.',
     });
   }
 }

@@ -20,6 +20,8 @@
     "test:sprint3:m4": "node test-sprint3-module4.js",
     "test:sprint3": "node test-sprint3-module1.js && node test-sprint3-module2.js && node test-sprint3-module3.js && node test-sprint3-module4.js",
     "test:sprint4:m1": "node test-sprint4-module1.js",
+    "test:sprint4:m2": "node test-sprint4-module2.js",
+    "test:sprint4": "node test-sprint4-module1.js && node test-sprint4-module2.js",
     "qdrant:check": "node scripts/check-qdrant.js",
     "qdrant:init": "node scripts/check-qdrant.js --init"
   },
@@ -45,6 +47,7 @@
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.12.1",
     "morgan": "^1.10.0",
+    "multer": "^2.5.0",
     "pdf-parse": "^2.4.5",
     "redis": "^4.7.0",
     "zod": "^3.24.2"

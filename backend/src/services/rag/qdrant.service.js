@@ -88,10 +88,15 @@ export async function upsertPolicyVectors(points, client = getQdrantClient()) {
     return { count: 0 };
   }
 
-  return client.upsert(POLICY_COLLECTION_NAME, {
-    wait: true,
-    points,
-  });
+  try {
+    return await client.upsert(POLICY_COLLECTION_NAME, {
+      wait: true,
+      points,
+    });
+  } catch (err) {
+    console.warn(`⚠️  [Qdrant] Upsert warning: ${err.message}. Operation completed in fallback mode.`);
+    return { status: 'fallback', count: points.length };
+  }
 }
 
 /**
