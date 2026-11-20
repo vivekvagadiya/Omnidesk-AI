@@ -8,6 +8,7 @@
     "start": "node src/server.js",
     "dev": "node --watch --env-file=.env src/server.js",
     "seed": "node scripts/seed.js",
+    "seed:policies": "node scripts/seed-policies.js",
     "test": "npm run test:sprint4",
     "test:sprint1": "node test/test-sprint1.js",
     "test:sprint2:m1": "node test/test-sprint2-module1.js",

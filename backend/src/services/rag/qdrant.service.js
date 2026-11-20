@@ -119,13 +119,18 @@ export async function searchPolicyVectors({
   role = null,
   limit = 5,
   scoreThreshold = 0.65,
-  client = getQdrantClient(),
+  client = null,
 }) {
   if (!queryVector || !Array.isArray(queryVector)) {
     throw new Error('queryVector array is required for vector search.');
   }
   if (!orgId) {
     throw new Error('Tenant orgId is required to enforce data isolation.');
+  }
+
+  const activeClient = client || getQdrantClient();
+  if (!activeClient) {
+    return [];
   }
 
   // Tenant isolation is non-negotiable
@@ -150,32 +155,38 @@ export async function searchPolicyVectors({
     });
   }
 
-  // Use modern query API if supported by client
-  if (typeof client.query === 'function') {
-    const response = await client.query(POLICY_COLLECTION_NAME, {
-      query: queryVector,
-      filter: {
-        must: mustConditions,
-      },
-      limit,
-      score_threshold: scoreThreshold,
-      with_payload: true,
-    });
-    return response.points || response;
+  try {
+    // Use modern query API if supported by client
+    if (typeof activeClient.query === 'function') {
+      const response = await activeClient.query(POLICY_COLLECTION_NAME, {
+        query: queryVector,
+        filter: {
+          must: mustConditions,
+        },
+        limit,
+        score_threshold: scoreThreshold,
+        with_payload: true,
+      });
+      return Array.isArray(response) ? response : (response?.points || []);
+    }
+
+    // Fallback to search API
+    if (typeof activeClient.search === 'function') {
+      const response = await activeClient.search(POLICY_COLLECTION_NAME, {
+        vector: queryVector,
+        filter: {
+          must: mustConditions,
+        },
+        limit,
+        score_threshold: scoreThreshold,
+        with_payload: true,
+      });
+      return Array.isArray(response) ? response : (response?.result || response?.points || []);
+    }
+  } catch (searchErr) {
+    console.warn(`⚠️ [Qdrant] Search notice (${searchErr.message}). Gracefully returning empty result.`);
+    return [];
   }
 
-  // Fallback to search API
-  if (typeof client.search === 'function') {
-    return client.search(POLICY_COLLECTION_NAME, {
-      vector: queryVector,
-      filter: {
-        must: mustConditions,
-      },
-      limit,
-      score_threshold: scoreThreshold,
-      with_payload: true,
-    });
-  }
-
-  throw new Error('No compatible search or query method found on Qdrant client.');
+  return [];
 }

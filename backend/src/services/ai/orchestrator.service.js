@@ -528,7 +528,7 @@ export async function streamCopilotTurn({
     });
 
     const retrievalResult = await retrievePolicyContext({
-      query: maskedText,
+      query: (detectedTool && detectedTool.args?.query) || maskedText,
       user,
       embeddingProvider: customEmbeddingProvider,
       qdrantClient,
@@ -536,7 +536,7 @@ export async function streamCopilotTurn({
 
     const systemInstruction = buildSystemInstructions({
       user,
-      evidenceContext: retrievalResult.contextBlock,
+      evidenceContext: retrievalResult?.contextBlock || '',
     });
 
     // Generate tokens from LLM
@@ -606,15 +606,17 @@ export async function streamCopilotTurn({
     }
 
     // Zero-hallucination guardrail check
-    if (!retrievalResult.isGrounded && (!accumulatedText || accumulatedText.length < 5)) {
-      accumulatedText = retrievalResult.fallbackMessage;
+    if (!retrievalResult?.isGrounded && (!accumulatedText || accumulatedText.length < 5)) {
+      accumulatedText =
+        retrievalResult?.fallbackMessage ||
+        'No company policy covers this topic. Would you like me to raise an HR or IT ticket for assistance?';
       onEvent('token', { delta: accumulatedText });
     }
 
     // Package citations
     const packaged = packageResponseWithCitations({
       answerText: accumulatedText,
-      chunks: retrievalResult.chunks,
+      chunks: retrievalResult?.chunks || [],
       query: message,
     });
 

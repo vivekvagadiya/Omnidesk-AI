@@ -36,29 +36,31 @@ export function buildCitationPayload(chunks) {
     return [];
   }
 
-  return chunks.map((chunk, index) => {
-    const citationIndex = index + 1;
-    const docName = chunk.documentName || 'Policy Document';
-    const sectionTitle = chunk.sectionTitle || 'General Policy';
-    const score = typeof chunk.score === 'number' ? chunk.score : 0;
-    const confidencePercent = Math.round(score * 100);
+  return chunks
+    .filter((chunk) => chunk && typeof chunk === 'object')
+    .map((chunk, index) => {
+      const citationIndex = index + 1;
+      const docName = chunk.documentName || 'Policy Document';
+      const sectionTitle = chunk.sectionTitle || 'General Policy';
+      const score = typeof chunk.score === 'number' ? chunk.score : 0;
+      const confidencePercent = chunk.confidencePercent || Math.round(score * 100);
 
-    return {
-      citationId: `cite_${chunk.chunkId || citationIndex}`,
-      index: citationIndex,
-      badge: `[${citationIndex}]`,
-      label: formatCitationLabel(chunk),
-      documentId: chunk.documentId || `doc_${citationIndex}`,
-      documentName: docName,
-      sectionTitle,
-      confidenceScore: Math.round(score * 1000) / 1000,
-      confidencePercent,
-      department: chunk.department || 'General',
-      excerpt: chunk.text ? chunk.text.trim() : '',
-      allowedRoles: chunk.allowedRoles || ['employee'],
-      orgId: chunk.orgId,
-    };
-  });
+      return {
+        citationId: `cite_${chunk.chunkId || citationIndex}`,
+        index: citationIndex,
+        badge: `[${citationIndex}]`,
+        label: formatCitationLabel(chunk),
+        documentId: chunk.documentId || `doc_${citationIndex}`,
+        documentName: docName,
+        sectionTitle,
+        confidenceScore: Math.round(score * 1000) / 1000,
+        confidencePercent,
+        department: chunk.department || 'General',
+        excerpt: chunk.text ? chunk.text.trim() : '',
+        allowedRoles: chunk.allowedRoles || ['employee'],
+        orgId: chunk.orgId,
+      };
+    });
 }
 
 /**

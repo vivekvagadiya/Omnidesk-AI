@@ -4,6 +4,7 @@ import { Organization } from '../src/models/Organization.model.js';
 import { User } from '../src/models/User.model.js';
 import { Asset } from '../src/models/Asset.model.js';
 import { Ticket } from '../src/models/Ticket.model.js';
+import { seedPolicies } from './seed-policies.js';
 
 export const SEEDED_ACCOUNTS = [
   {
@@ -192,6 +193,13 @@ async function seed() {
       }))
     );
     console.log('================================================================\n');
+
+    // 5. Seed Qdrant Policy Vectors
+    try {
+      await seedPolicies();
+    } catch (policyErr) {
+      console.warn('⚠️ [Seeder] Qdrant policy seeding notice:', policyErr.message);
+    }
   } catch (error) {
     console.error('❌ [Seeder] Error seeding database:', error);
   } finally {

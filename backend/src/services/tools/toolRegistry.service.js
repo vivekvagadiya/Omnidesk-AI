@@ -59,13 +59,13 @@ export async function searchPolicies(args = {}, context = {}) {
 
   return {
     tool: 'searchPolicies',
-    isGrounded: retrieval.isGrounded,
-    query: retrieval.query || query,
-    contextBlock: retrieval.contextBlock || '',
-    chunks: retrieval.chunks || [],
-    totalResults: retrieval.chunks ? retrieval.chunks.length : 0,
-    fallbackMessage: retrieval.fallbackMessage || null,
-    suggestedAction: retrieval.suggestedAction || null,
+    isGrounded: Boolean(retrieval?.isGrounded),
+    query: retrieval?.query || query,
+    contextBlock: retrieval?.contextBlock || '',
+    chunks: retrieval?.chunks || [],
+    totalResults: retrieval?.chunks ? retrieval.chunks.length : 0,
+    fallbackMessage: retrieval?.fallbackMessage || null,
+    suggestedAction: retrieval?.suggestedAction || null,
   };
 }
 
