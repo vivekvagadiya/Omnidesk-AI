@@ -16,6 +16,8 @@
     "test:sprint2": "node test-sprint2-module1.js && node test-sprint2-module2.js && node test-sprint2-module3.js && node test-sprint2-module4.js",
     "test:sprint3:m1": "node test-sprint3-module1.js",
     "test:sprint3:m2": "node test-sprint3-module2.js",
+    "test:sprint3:m3": "node test-sprint3-module3.js",
+    "test:sprint3": "node test-sprint3-module1.js && node test-sprint3-module2.js && node test-sprint3-module3.js",
     "qdrant:check": "node scripts/check-qdrant.js",
     "qdrant:init": "node scripts/check-qdrant.js --init"
   },
