@@ -1,4 +1,4 @@
-import { getRedisClient } from '../../config/redis.js';
+import { getRedisClient, createDedicatedClient, closeClient } from '../../config/redis.js';
 
 export const NOTIFICATION_QUEUE_KEY = 'queue:notifications';
 
@@ -16,6 +16,7 @@ export async function enqueueNotification(payload, client = getRedisClient()) {
 
   if (client && client.isOpen) {
     try {
+      // Fails fast while Redis is reconnecting (offline queue disabled) → memory fallback below
       await client.lPush(NOTIFICATION_QUEUE_KEY, serialized);
       return true;
     } catch (err) {
@@ -86,15 +87,42 @@ export function processNotification(payload) {
 
 let isWorkerRunning = false;
 let workerDedicatedClient = null;
+let workerLoopPromise = null;
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
- * Start the background notification worker consumer loop
- * Uses Redis BRPOP / brPop on queue:notifications, with fallback queue polling
+ * Pop one message without ever blocking a shared connection.
+ *  - Dedicated client: BRPOP (waits up to 1s server-side, zero CPU while idle).
+ *  - Shared client:    RPOP (non-blocking) — used only when a dedicated client is disabled.
+ */
+async function popMessage(useDedicatedClient) {
+  if (useDedicatedClient) {
+    if (workerDedicatedClient?.isReady) {
+      const popResult = await workerDedicatedClient.brPop(NOTIFICATION_QUEUE_KEY, 1);
+      return popResult?.element || null;
+    }
+    return null;
+  }
+
+  const shared = getRedisClient();
+  if (shared?.isReady) {
+    return shared.rPop(NOTIFICATION_QUEUE_KEY);
+  }
+  return null;
+}
+
+/**
+ * Start the background notification worker consumer loop.
+ *
+ * Runs on its own Redis connection by default: BRPOP blocks the connection it runs on,
+ * so running it on the shared client would stall every cache/session/HITL command
+ * for up to a second per loop iteration.
  *
  * @param {Object} [options]
- * @param {number} [options.pollingIntervalMs=500] Poll interval when queue empty
- * @param {boolean} [options.useDedicatedClient=true] Clone Redis connection for blocking pop
- * @param {Function} [options.onDispatched] Event listener for tests/telemetry
+ * @param {number} [options.pollingIntervalMs=500] Sleep when nothing was dequeued
+ * @param {boolean} [options.useDedicatedClient=true] false = non-blocking RPOP polling on the shared client
+ * @param {Function} [options.onDispatched] Listener for tests/telemetry
  */
 export async function startNotificationWorker({
   pollingIntervalMs = 500,
@@ -108,38 +136,24 @@ export async function startNotificationWorker({
   isWorkerRunning = true;
   console.log('👷 [Notification Worker] Worker started, listening on queue:notifications...');
 
-  const mainRedis = getRedisClient();
-
-  if (useDedicatedClient && mainRedis && mainRedis.isOpen && typeof mainRedis.duplicate === 'function') {
-    try {
-      workerDedicatedClient = mainRedis.duplicate();
-      await workerDedicatedClient.connect();
-    } catch (dupErr) {
-      console.warn(`⚠️ [Notification Worker] Could not duplicate Redis client: ${dupErr.message}.`);
-      workerDedicatedClient = null;
-    }
+  if (useDedicatedClient) {
+    // Connects (and reconnects) in the background — no need for Redis to be up yet
+    workerDedicatedClient = createDedicatedClient('worker');
   }
 
-  (async () => {
+  workerLoopPromise = (async () => {
     while (isWorkerRunning) {
       try {
         let rawMessage = null;
 
-        const client = workerDedicatedClient || (mainRedis?.isOpen ? mainRedis : null);
-
-        if (client && client.isOpen) {
-          try {
-            // brPop in node-redis v4 returns { key, element } or null after timeout
-            const popResult = await client.brPop(NOTIFICATION_QUEUE_KEY, 1);
-            if (popResult && popResult.element) {
-              rawMessage = popResult.element;
-            }
-          } catch (redisErr) {
-            if (!isWorkerRunning) break;
-          }
+        try {
+          rawMessage = await popMessage(useDedicatedClient);
+        } catch (redisErr) {
+          if (!isWorkerRunning) break;
+          // Connection dropped mid-command; the client reconnects on its own
         }
 
-        // Check fallback in-memory queue
+        // Drain anything queued in memory while Redis was unavailable
         if (!rawMessage && inMemoryQueue.length > 0) {
           rawMessage = inMemoryQueue.shift();
         }
@@ -153,13 +167,14 @@ export async function startNotificationWorker({
               console.error('⚠️ [Notification Worker] Listener error:', dispatchErr.message);
             }
           }
-        } else {
-          await new Promise((resolve) => setTimeout(resolve, pollingIntervalMs));
+        } else if (!(useDedicatedClient && workerDedicatedClient?.isReady)) {
+          // BRPOP already waited server-side; only sleep when we didn't block
+          await sleep(pollingIntervalMs);
         }
       } catch (loopErr) {
         if (!isWorkerRunning) break;
         console.error('⚠️ [Notification Worker] Error in consumer loop:', loopErr.message);
-        await new Promise((resolve) => setTimeout(resolve, 1000));
+        await sleep(1000);
       }
     }
 
@@ -172,13 +187,13 @@ export async function startNotificationWorker({
  */
 export async function stopNotificationWorker() {
   isWorkerRunning = false;
-  if (workerDedicatedClient && workerDedicatedClient.isOpen) {
-    try {
-      await workerDedicatedClient.quit();
-    } catch {
-      // Ignore cleanup error
-    }
+  if (workerDedicatedClient) {
+    await closeClient(workerDedicatedClient);
     workerDedicatedClient = null;
+  }
+  if (workerLoopPromise) {
+    await workerLoopPromise.catch(() => {});
+    workerLoopPromise = null;
   }
 }
 

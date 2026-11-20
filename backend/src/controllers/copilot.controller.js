@@ -13,7 +13,7 @@ import {
   IngestionValidationError,
 } from '../services/rag/ingestion.service.js';
 import { successResponse, errorResponse } from '../utils/apiResponse.js';
-import { getRedisClient } from '../config/redis.js';
+import { enqueueNotification } from '../services/queue/notificationWorker.js';
 
 /**
  * Controller: Stream Copilot Chat with SSE
@@ -111,26 +111,16 @@ export async function approveAction(req, res) {
       decision: 'APPROVE',
     });
 
-    // Enqueue async notification event to Redis queue for background worker
-    try {
-      const redis = getRedisClient();
-      if (redis && redis.isOpen) {
-        await redis.lPush(
-          'queue:notifications',
-          JSON.stringify({
-            event: 'ACTION_APPROVED',
-            actionId: actionId.trim(),
-            userId: user.userId,
-            orgId: user.orgId,
-            type: result.type,
-            details: result.result,
-            createdAt: new Date().toISOString(),
-          })
-        );
-      }
-    } catch (queueErr) {
-      console.warn(`⚠️ [Notification Queue] Failed to push notification: ${queueErr.message}`);
-    }
+    // Async notification for the background worker
+    await enqueueNotification({
+      event: 'ACTION_APPROVED',
+      actionId: actionId.trim(),
+      userId: user.userId,
+      orgId: user.orgId,
+      type: result.type,
+      details: result.result,
+      createdAt: new Date().toISOString(),
+    });
 
     return successResponse(res, {
       statusCode: 200,

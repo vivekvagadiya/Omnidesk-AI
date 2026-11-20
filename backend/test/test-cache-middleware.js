@@ -1,291 +1,196 @@
-import { cacheResponse, invalidateCache, invalidateHttpCache } from '../src/middlewares/cache.middleware.js';
-import { getCache, setCache, invalidateCachePattern } from '../src/services/cache/cache.service.js';
+/**
+ * Route-level cache — integration test against a REAL Redis.
+ *
+ * The previous version replaced Redis with a mock and never asserted a cache HIT,
+ * so it passed even while caching was broken. This one spins up a small Express app
+ * with the real middleware and the real Redis from .env (docker compose up -d).
+ *
+ * Run: npm run test:cache
+ */
+import express from 'express';
+import crypto from 'node:crypto';
+import { connectRedis, disconnectRedis, getRedisClient, isRedisReady } from '../src/config/redis.js';
+import { cacheResponse } from '../src/middlewares/cache.middleware.js';
+import {
+  cacheTags,
+  invalidateTicketCaches,
+  invalidateBalanceCaches,
+  invalidateResourceForOrg,
+} from '../src/services/cache/cache.service.js';
+import {
+  startNotificationWorker,
+  stopNotificationWorker,
+  enqueueNotification,
+} from '../src/services/queue/notificationWorker.js';
 
-console.log('================================================================');
-console.log('🚀 OMNIDESK AI — ROUTE-LEVEL CACHING MIDDLEWARE VERIFICATION');
-console.log('================================================================\n');
-
-let totalTests = 0;
-let passedTests = 0;
-
+let total = 0;
+let passed = 0;
 function assert(condition, description) {
-  totalTests++;
+  total++;
   if (condition) {
-    passedTests++;
+    passed++;
     console.log(`  ✅ [PASS] ${description}`);
   } else {
     console.error(`  ❌ [FAIL] ${description}`);
   }
 }
 
-/**
- * In-memory Mock Redis Client for isolated test environment
- */
-function createMockRedisClient() {
-  const store = new Map();
-  return {
-    isOpen: true,
-    async get(key) {
-      return store.has(key) ? store.get(key) : null;
-    },
-    async set(key, value, options) {
-      store.set(key, value);
-      return 'OK';
-    },
-    async del(keys) {
-      const keyList = Array.isArray(keys) ? keys : [keys];
-      for (const k of keyList) {
-        store.delete(k);
-      }
-      return keyList.length;
-    },
-    async keys(pattern) {
-      const regexStr = '^' + pattern.replace(/\*/g, '.*') + '$';
-      const regex = new RegExp(regexStr);
-      const matched = [];
-      for (const k of store.keys()) {
-        if (regex.test(k)) {
-          matched.push(k);
-        }
-      }
-      return matched;
-    },
-    _store: store,
-  };
-}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/**
- * Mock Request Generator
- */
-function createMockReq({
-  method = 'GET',
-  url = '/api/profile/balance',
-  originalUrl = null,
-  user = { orgId: 'org_test_123', userId: 'user_456', role: 'employee' },
-  headers = {},
-  body = {},
-} = {}) {
-  return {
-    method,
-    url,
-    originalUrl: originalUrl || url,
-    user,
-    headers,
-    body,
-  };
-}
+// Unique tenant per run so reruns never see each other's keys
+const ORG = `org_cachetest_${crypto.randomBytes(3).toString('hex')}`;
+const OTHER_ORG = `${ORG}_other`;
+const ADMIN_ROLES = ['org_admin'];
 
-/**
- * Mock Response Generator
- */
-function createMockRes() {
-  const res = {
-    statusCode: 200,
-    headers: {},
-    payload: null,
-    writableEnded: false,
-    setHeader(key, value) {
-      this.headers[key.toLowerCase()] = value;
-      return this;
-    },
-    status(code) {
-      this.statusCode = code;
-      return this;
-    },
-    json(data) {
-      this.payload = data;
-      this.writableEnded = true;
-      return this;
-    },
-  };
-  return res;
-}
+function buildApp() {
+  const app = express();
+  const calls = { balance: 0, tickets: 0 };
+  const control = { balanceDelayMs: 0, failNext: false };
 
-async function runTests() {
-  // Setup in-memory Redis client replacement for cache.service
-  const mockRedis = createMockRedisClient();
-  const originalGet = getCache;
-  const originalSet = setCache;
+  // Fake auth: identity comes from test headers
+  app.use((req, _res, next) => {
+    req.user = {
+      orgId: req.headers['x-test-org'] || ORG,
+      userId: req.headers['x-test-user'] || 'emp_1',
+      role: req.headers['x-test-role'] || 'employee',
+    };
+    next();
+  });
 
-  // Patch cache.service with in-memory Redis for these unit tests
-  const inMemCache = new Map();
-  const testGetCache = async (key) => {
-    return inMemCache.has(key) ? inMemCache.get(key) : null;
-  };
-  const testSetCache = async (key, data, ttl) => {
-    inMemCache.set(key, data);
-    return true;
-  };
-  const testInvalidatePattern = async (pattern) => {
-    const regex = new RegExp('^' + pattern.replace(/\*/g, '.*') + '$');
-    for (const k of inMemCache.keys()) {
-      if (regex.test(k)) {
-        inMemCache.delete(k);
-      }
+  app.get('/api/profile/balance', cacheResponse({ ttl: 60, tag: 'balance' }), async (req, res) => {
+    calls.balance++;
+    const n = calls.balance;
+    if (control.balanceDelayMs) await sleep(control.balanceDelayMs);
+    if (control.failNext) {
+      control.failNext = false;
+      return res.status(500).json({ success: false, message: 'boom' });
     }
-    return true;
+    res.json({ success: true, data: { call: n, userId: req.user.userId } });
+  });
+
+  const ticketTags = (req) => {
+    const { orgId, userId, role } = req.user;
+    if (!ADMIN_ROLES.includes(role)) return [cacheTags.user('tickets', orgId, userId)];
+    return [cacheTags.org('tickets', orgId)];
+  };
+  app.get('/api/tickets', cacheResponse({ ttl: 60, tag: 'tickets', tags: ticketTags }), (req, res) => {
+    calls.tickets++;
+    res.json({ success: true, data: { call: calls.tickets } });
+  });
+
+  return { app, calls, control };
+}
+
+async function run() {
+  console.log('================================================================');
+  console.log('🚀 OMNIDESK AI — ROUTE-LEVEL CACHE (REAL REDIS) VERIFICATION');
+  console.log('================================================================\n');
+
+  await connectRedis({ waitMs: 5000 });
+  if (!isRedisReady()) {
+    console.error('❌ Redis is not reachable. Start it first: docker compose up -d redis');
+    process.exit(1);
+  }
+
+  const { app, calls, control } = buildApp();
+  const server = app.listen(0);
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  const get = async (path, { user = 'emp_1', org = ORG, role = 'employee', headers = {} } = {}) => {
+    const r = await fetch(base + path, {
+      headers: { 'x-test-user': user, 'x-test-org': org, 'x-test-role': role, ...headers },
+    });
+    return { status: r.status, cache: r.headers.get('x-cache'), body: await r.json() };
   };
 
   try {
-    console.log('--- Suite 1: Cache Miss & Monkey-Patch Interception ---');
-    const cacheMiddleware = cacheResponse({ ttl: 300, tag: 'balance', scope: 'user' });
+    console.log('--- Suite 1: Miss then Hit ---');
+    const a1 = await get('/api/profile/balance');
+    const a2 = await get('/api/profile/balance');
+    assert(a1.cache === 'MISS', 'First request is a MISS');
+    assert(a2.cache === 'HIT', 'Second request is a HIT');
+    assert(calls.balance === 1, 'Controller ran only once');
+    assert(a2.body.data.call === 1, 'HIT returns the stored body');
 
-    let controllerExecuted = false;
-    const req1 = createMockReq({
-      url: '/api/profile/balance',
-      user: { orgId: 'org_acme', userId: 'usr_sarah', role: 'employee' },
-    });
-    const res1 = createMockRes();
+    console.log('\n--- Suite 2: Isolation ---');
+    const b1 = await get('/api/profile/balance', { user: 'emp_2' });
+    const c1 = await get('/api/profile/balance', { org: OTHER_ORG });
+    assert(b1.cache === 'MISS' && b1.body.data.userId === 'emp_2', 'Other user in same org gets their own entry');
+    assert(c1.cache === 'MISS', 'Same userId in another org gets its own entry');
+    const q1 = await get('/api/tickets?status=OPEN');
+    const q2 = await get('/api/tickets?status=RESOLVED');
+    assert(q1.cache === 'MISS' && q2.cache === 'MISS', 'Different query strings are cached separately');
 
-    // Hook middleware into mock cache
-    const origGet = await getCache('dummy'); // verify interface
-    // Execute cache middleware
-    await cacheMiddleware(req1, res1, () => {
-      controllerExecuted = true;
-      res1.status(200).json({
-        success: true,
-        data: { casualLeave: 12, sickLeave: 7 },
-      });
-    });
+    console.log('\n--- Suite 3: Browser no-cache header does NOT bypass ---');
+    const d1 = await get('/api/profile/balance', { headers: { 'cache-control': 'no-cache', pragma: 'no-cache' } });
+    assert(d1.cache === 'HIT', 'Chrome DevTools "Disable cache" headers still hit Redis');
+    const d2 = await get('/api/profile/balance', { headers: { 'x-cache-bypass': '1' } });
+    assert(d2.cache === 'BYPASS', 'Explicit X-Cache-Bypass: 1 bypasses (non-production)');
 
-    assert(res1.headers['x-cache'] === 'MISS', 'Initial request sets X-Cache: MISS header');
-    assert(res1.headers['x-cache-key']?.includes('cache:http:org_acme:balance:u_usr_sarah'), 'Sets multi-tenant X-Cache-Key header');
-    assert(controllerExecuted === true, 'Controller executed on cache miss');
-    assert(res1.payload?.data?.casualLeave === 12, 'Response payload sent through monkey-patched res.json');
+    console.log('\n--- Suite 4: Scoped invalidation ---');
+    await get('/api/tickets', { user: 'emp_1' });
+    await get('/api/tickets', { user: 'emp_2' });
+    await get('/api/tickets', { user: 'admin_1', role: 'org_admin' });
+    assert((await get('/api/tickets', { user: 'emp_1' })).cache === 'HIT', 'emp_1 tickets cached');
 
-    console.log('\n--- Suite 2: Cache Hit (< 3ms Short-Circuit) ---');
-    // Simulate population in cache for the key
-    const expectedKey = res1.headers['x-cache-key'];
-    inMemCache.set(expectedKey, {
-      success: true,
-      data: { casualLeave: 12, sickLeave: 7, cached: true },
-    });
-
-    // Sub in test getter
-    let secondControllerExecuted = false;
-    const req2 = createMockReq({
-      url: '/api/profile/balance',
-      user: { orgId: 'org_acme', userId: 'usr_sarah', role: 'employee' },
-    });
-    const res2 = createMockRes();
-
-    // We simulate hitting cache by calling middleware with pre-cached item
-    // In our implementation, cacheResponse uses getCache from cache.service.js
-    // Let's test with the actual middleware function flow
-    assert(typeof cacheResponse === 'function', 'cacheResponse middleware factory is exported properly');
-    assert(typeof invalidateCache === 'function', 'invalidateCache middleware factory is exported properly');
-    assert(typeof invalidateHttpCache === 'function', 'invalidateHttpCache helper is exported properly');
-
-    console.log('\n--- Suite 3: Multi-Tenant & User Scope Isolation ---');
-    const reqUser1 = createMockReq({
-      url: '/api/profile/balance',
-      user: { orgId: 'org_acme', userId: 'usr_1', role: 'employee' },
-    });
-    const resUser1 = createMockRes();
-    await cacheMiddleware(reqUser1, resUser1, () => {});
-
-    const reqUser2 = createMockReq({
-      url: '/api/profile/balance',
-      user: { orgId: 'org_acme', userId: 'usr_2', role: 'employee' },
-    });
-    const resUser2 = createMockRes();
-    await cacheMiddleware(reqUser2, resUser2, () => {});
-
-    const reqForeignTenant = createMockReq({
-      url: '/api/profile/balance',
-      user: { orgId: 'org_globex', userId: 'usr_1', role: 'employee' },
-    });
-    const resForeignTenant = createMockRes();
-    await cacheMiddleware(reqForeignTenant, resForeignTenant, () => {});
-
+    await invalidateTicketCaches({ orgId: ORG, userId: 'emp_1' });
+    assert((await get('/api/tickets', { user: 'emp_1' })).cache === 'MISS', 'emp_1 tickets refreshed after their ticket changed');
+    assert((await get('/api/tickets', { user: 'emp_2' })).cache === 'HIT', 'emp_2 tickets untouched');
     assert(
-      resUser1.headers['x-cache-key'] !== resUser2.headers['x-cache-key'],
-      'Different users in same tenant have isolated cache keys'
-    );
-    assert(
-      resUser1.headers['x-cache-key'] !== resForeignTenant.headers['x-cache-key'],
-      'Different tenants with identical user IDs have completely isolated cache keys'
+      (await get('/api/tickets', { user: 'admin_1', role: 'org_admin' })).cache === 'MISS',
+      'Admin org-wide ticket view refreshed'
     );
 
-    console.log('\n--- Suite 4: Query Parameter Sensitivity ---');
-    const ticketsMiddleware = cacheResponse({ ttl: 120, tag: 'tickets', scope: 'user' });
-    const reqQueryA = createMockReq({
-      url: '/api/tickets?status=OPEN',
-      user: { orgId: 'org_acme', userId: 'usr_1', role: 'employee' },
-    });
-    const resQueryA = createMockRes();
-    await ticketsMiddleware(reqQueryA, resQueryA, () => {});
+    await invalidateBalanceCaches({ orgId: ORG, userId: 'emp_1' });
+    assert((await get('/api/profile/balance', { user: 'emp_1' })).cache === 'MISS', 'emp_1 balance refreshed after leave approval');
+    assert((await get('/api/profile/balance', { user: 'emp_2' })).cache === 'HIT', 'emp_2 balance untouched');
 
-    const reqQueryB = createMockReq({
-      url: '/api/tickets?status=RESOLVED',
-      user: { orgId: 'org_acme', userId: 'usr_1', role: 'employee' },
-    });
-    const resQueryB = createMockRes();
-    await ticketsMiddleware(reqQueryB, resQueryB, () => {});
+    await invalidateResourceForOrg(ORG, 'balance');
+    assert((await get('/api/profile/balance', { user: 'emp_2' })).cache === 'MISS', 'Org-wide flush clears every user');
+    assert((await get('/api/profile/balance', { org: OTHER_ORG })).cache === 'HIT', 'Org-wide flush does not touch other tenants');
 
-    assert(
-      resQueryA.headers['x-cache-key'] !== resQueryB.headers['x-cache-key'],
-      'Different query parameters generate distinct cache keys'
-    );
-    assert(
-      resQueryA.headers['x-cache-key'].includes('status=OPEN') &&
-      resQueryB.headers['x-cache-key'].includes('status=RESOLVED'),
-      'Cache keys preserve query strings for pagination and filter isolation'
-    );
+    console.log('\n--- Suite 5: Stale-write race ---');
+    await invalidateBalanceCaches({ orgId: ORG, userId: 'emp_9' });
+    control.balanceDelayMs = 300;
+    const slow = get('/api/profile/balance', { user: 'emp_9' }); // reads "old" data
+    await sleep(50);
+    await invalidateBalanceCaches({ orgId: ORG, userId: 'emp_9' }); // mutation lands mid-request
+    await slow;
+    control.balanceDelayMs = 0;
+    const after = await get('/api/profile/balance', { user: 'emp_9' });
+    assert(after.cache === 'MISS', 'Slow pre-mutation response is not served after invalidation');
 
-    console.log('\n--- Suite 5: Cache-Control Bypass ---');
-    const reqBypass = createMockReq({
-      url: '/api/profile/balance',
-      user: { orgId: 'org_acme', userId: 'usr_1', role: 'employee' },
-      headers: { 'cache-control': 'no-cache' },
-    });
-    const resBypass = createMockRes();
-    let bypassControllerRan = false;
-    await cacheMiddleware(reqBypass, resBypass, () => {
-      bypassControllerRan = true;
-    });
+    console.log('\n--- Suite 6: Errors are never cached ---');
+    control.failNext = true;
+    await invalidateBalanceCaches({ orgId: ORG, userId: 'emp_err' });
+    const e1 = await get('/api/profile/balance', { user: 'emp_err' });
+    const e2 = await get('/api/profile/balance', { user: 'emp_err' });
+    assert(e1.status === 500 && e2.status === 200 && e2.cache === 'MISS', '500 response was not stored');
 
-    assert(resBypass.headers['x-cache'] === 'BYPASS', 'Cache-Control: no-cache header yields X-Cache: BYPASS');
-    assert(bypassControllerRan === true, 'Downstream controller runs on cache bypass');
-
-    console.log('\n--- Suite 6: Mutation Invalidation Middleware ---');
-    const ticketInvalidator = invalidateCache(['tickets']);
-    const postReq = createMockReq({
-      method: 'POST',
-      url: '/api/tickets',
-      user: { orgId: 'org_acme', userId: 'usr_1', role: 'employee' },
-      body: { title: 'New Broken Monitor', category: 'IT_HARDWARE' },
-    });
-    const postRes = createMockRes();
-
-    let postControllerRan = false;
-    await ticketInvalidator(postReq, postRes, () => {
-      postControllerRan = true;
-      postRes.status(201).json({ success: true, ticketId: 'TICK-NEW-1' });
-    });
-
-    assert(postControllerRan === true, 'Mutation controller executed');
-    assert(postRes.statusCode === 201, 'Mutation returned 201 Created');
-
-    console.log('\n--- Suite 7: Fail-Open Error Handling ---');
-    // Test with non-GET method
-    const putReq = createMockReq({ method: 'PUT', url: '/api/profile/balance' });
-    const putRes = createMockRes();
-    let putControllerRan = false;
-    await cacheMiddleware(putReq, putRes, () => {
-      putControllerRan = true;
-    });
-    assert(putControllerRan === true, 'Non-GET requests bypass caching cleanly and proceed to controller');
-
-    console.log('\n================================================================');
-    console.log(`🎉 CACHING MIDDLEWARE VERIFICATION: ${passedTests}/${totalTests} TESTS PASSED!`);
-    console.log('================================================================\n');
-
-    process.exit(totalTests === passedTests ? 0 : 1);
-  } catch (err) {
-    console.error('Fatal error during cache middleware test execution:', err);
-    process.exit(1);
+    console.log('\n--- Suite 7: Worker does not block the shared connection ---');
+    const dispatched = [];
+    await startNotificationWorker({ onDispatched: (r) => dispatched.push(r) });
+    await sleep(300);
+    const t0 = Date.now();
+    for (let i = 0; i < 5; i++) await getRedisClient().ping();
+    const pingMs = Date.now() - t0;
+    assert(pingMs < 200, `Shared client stays responsive while worker waits on BRPOP (${pingMs}ms for 5 pings)`);
+    await enqueueNotification({ event: 'CACHE_TEST', orgId: ORG, createdAt: new Date().toISOString() });
+    await sleep(1500);
+    assert(dispatched.some((d) => d.event === 'CACHE_TEST'), 'Worker on dedicated connection consumed the event');
+    await stopNotificationWorker();
+  } finally {
+    server.close();
+    await disconnectRedis();
   }
+
+  console.log('\n================================================================');
+  console.log(`🎉 CACHE VERIFICATION: ${passed}/${total} TESTS PASSED`);
+  console.log('================================================================\n');
+  process.exit(passed === total ? 0 : 1);
 }
 
-runTests();
+run().catch((err) => {
+  console.error('Fatal error:', err);
+  process.exit(1);
+});

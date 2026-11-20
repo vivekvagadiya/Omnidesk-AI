@@ -2,8 +2,7 @@ import crypto from 'node:crypto';
 import { getRedisClient } from '../../config/redis.js';
 import { User } from '../../models/User.model.js';
 import { Ticket } from '../../models/Ticket.model.js';
-import { invalidateCacheKey, invalidateCachePattern } from '../cache/cache.service.js';
-import { invalidateHttpCache } from '../../middlewares/cache.middleware.js';
+import { invalidateTicketCaches, invalidateBalanceCaches } from '../cache/cache.service.js';
 import { Asset } from '../../models/Asset.model.js';
 
 export const ACTION_TOKEN_TTL_SECONDS = 900; // 15 minutes TTL
@@ -435,9 +434,9 @@ export async function consumeActionToken({
       ticketStatus: leaveTicket.status,
     };
 
-    // Invalidate cached balance and tickets for tenant (both route-level and legacy)
-    await invalidateHttpCache(staged.orgId, 'balance');
-    await invalidateHttpCache(staged.orgId, 'tickets');
+    // Refresh the employee's balance and ticket caches (not the whole org)
+    await invalidateBalanceCaches({ orgId: staged.orgId, userId: targetUserId });
+    await invalidateTicketCaches({ orgId: staged.orgId, userId: targetUserId });
   } else if (staged.type === ACTION_TYPES.REQUEST_HARDWARE_UPGRADE) {
     const { assetType, preferredModel, reason, urgency } = staged.payload;
 
@@ -465,8 +464,8 @@ export async function consumeActionToken({
       },
     });
 
-    // Invalidate cached tickets for tenant (both route-level and legacy)
-    await invalidateHttpCache(staged.orgId, 'tickets');
+    // Refresh the requester's ticket caches
+    await invalidateTicketCaches({ orgId: staged.orgId, userId: staged.userId });
 
     executionResult = {
       type: ACTION_TYPES.REQUEST_HARDWARE_UPGRADE,

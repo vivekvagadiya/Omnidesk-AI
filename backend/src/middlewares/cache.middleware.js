@@ -1,134 +1,110 @@
-import { getCache, setCache, invalidateCachePattern, CACHE_TTL } from '../services/cache/cache.service.js';
+import {
+  getCache,
+  setCache,
+  getTagVersions,
+  invalidateTags,
+  invalidateResourceForOrg,
+  cacheTags,
+  cacheStats,
+  CACHE_TTL,
+} from '../services/cache/cache.service.js';
+import { config } from '../config/environment.js';
 
 /**
- * Route-Level Declarative Caching Middleware
+ * Route-Level Response Cache
  *
- * Intercepts GET requests:
- * - If cache hit: returns cached payload immediately with HTTP headers:
- *     X-Cache: HIT
- *     X-Cache-Key: <key>
- *   (< 3ms response time, completely short-circuiting database queries and controller logic)
- * - If cache miss: sets X-Cache: MISS, intercepts res.json, and caches the response asynchronously in Redis.
+ * Mount AFTER authenticateJwt so RBAC always runs and req.user is known.
  *
- * Multi-tenant isolation is strictly enforced via tenant orgId and optional user scope.
+ *   router.get('/balance', cacheResponse({ ttl: 300, tag: 'balance' }), controller)
+ *
+ * Response header X-Cache tells you exactly what happened:
+ *   HIT    served from Redis, controller skipped
+ *   MISS   controller ran, response stored
+ *   BYPASS caller sent X-Cache-Bypass: 1 (non-production only)
+ *   SKIP   Redis not ready — controller ran, nothing stored (check Redis!)
+ *
+ * NOTE: the browser's `Cache-Control: no-cache` header is deliberately ignored.
+ * Chrome DevTools sends it on every request while "Disable cache" is ticked,
+ * which made the old middleware bypass Redis for every request during development.
  *
  * @param {Object} options
- * @param {number} [options.ttl=300] Time-to-live in seconds
- * @param {string} [options.tag='route'] Resource tag for grouped pattern invalidation (e.g. 'balance', 'tickets')
- * @param {Function} [options.keyGenerator] Optional custom key generator: (req) => string
- * @param {'user'|'org'|'public'} [options.scope='user'] Scope level:
- *   - 'user': isolated per user per org (e.g., leave balance, personal tickets)
- *   - 'org': isolated per tenant organization
- *   - 'public': shared globally
- * @returns {import('express').RequestHandler}
+ * @param {number} [options.ttl=300] Seconds
+ * @param {string} options.tag Resource name, e.g. 'tickets' | 'balance'
+ * @param {'user'|'org'} [options.scope='user'] Key isolation level
+ * @param {(req) => string[]} [options.tags] Tags this response depends on.
+ *        Defaults: user scope → that user's tag; org scope → the org-wide tag.
+ * @param {(req) => string} [options.keyGenerator] Custom base key
  */
 export function cacheResponse(options = {}) {
-  const {
-    ttl = CACHE_TTL.BALANCE || 300,
-    tag = 'route',
-    keyGenerator = null,
-    scope = 'user',
-  } = options;
+  const { ttl = CACHE_TTL.BALANCE, tag = 'route', scope = 'user', tags = null, keyGenerator = null } = options;
 
   return async function cacheMiddleware(req, res, next) {
-    // Only cache GET requests
-    if (req.method !== 'GET') {
+    if (req.method !== 'GET' || !req.user?.orgId) {
       return next();
     }
 
-    // Bypass cache if client explicitly asks via header (e.g. Cache-Control: no-cache)
-    const cacheControl = req.headers?.['cache-control'] || '';
-    const pragma = req.headers?.['pragma'] || '';
-    if (cacheControl.includes('no-cache') || pragma.includes('no-cache')) {
+    if (req.headers?.['x-cache-bypass'] === '1' && config.nodeEnv !== 'production') {
       res.setHeader('X-Cache', 'BYPASS');
       return next();
     }
 
-    const orgId = req.user?.orgId || 'public';
-    const userId = req.user?.userId || 'anon';
+    const { orgId, userId } = req.user;
 
-    // Generate unique multi-tenant cache key
-    let cacheKey = null;
+    let baseKey = null;
     if (typeof keyGenerator === 'function') {
       try {
-        cacheKey = keyGenerator(req);
+        baseKey = keyGenerator(req);
       } catch (err) {
         console.warn(`⚠️ [Cache Middleware] Key generator failed: ${err.message}`);
       }
     }
-
-    if (!cacheKey) {
-      const scopeSegment = scope === 'user' ? `u_${userId}` : scope === 'org' ? `org_${orgId}` : 'pub';
-      const urlSegment = req.originalUrl || req.url;
-      cacheKey = `cache:http:${orgId}:${tag}:${scopeSegment}:${urlSegment}`;
+    if (!baseKey) {
+      const scopeSegment = scope === 'org' ? `org_${orgId}` : `u_${userId}`;
+      baseKey = `cache:http:${orgId}:${tag}:${scopeSegment}:${req.originalUrl || req.url}`;
     }
 
+    // Resolve dependency tags (always include the org-wide flush tag)
+    let dependencyTags;
     try {
-      // 1. Check Redis Cache
-      const cached = await getCache(cacheKey);
-      if (cached !== null && cached !== undefined) {
-        res.setHeader('X-Cache', 'HIT');
-        res.setHeader('X-Cache-Key', cacheKey);
-        const status = cached.statusCode || 200;
-        return res.status(status).json(cached);
-      }
-
-      // 2. Cache Miss: Instrument res.json to capture response
-      res.setHeader('X-Cache', 'MISS');
-      res.setHeader('X-Cache-Key', cacheKey);
-
-      const originalJson = res.json.bind(res);
-      res.json = function (body) {
-        // Restore original method to prevent potential recursive loops
-        res.json = originalJson;
-
-        // Cache only 2xx successful responses with a valid body
-        if (res.statusCode >= 200 && res.statusCode < 300 && body !== undefined && body !== null) {
-          // Asynchronously write to Redis (non-blocking)
-          setCache(cacheKey, body, ttl).catch((writeErr) => {
-            console.warn(`⚠️ [Cache Middleware] Async set failed for "${cacheKey}": ${writeErr.message}`);
-          });
-        }
-
-        return originalJson(body);
-      };
-
-      return next();
+      dependencyTags =
+        typeof tags === 'function'
+          ? tags(req)
+          : [scope === 'org' ? cacheTags.org(tag, orgId) : cacheTags.user(tag, orgId, userId)];
     } catch (err) {
-      // Fail-open: Proceed to controller even if Redis fails
-      console.warn(`⚠️ [Cache Middleware] Error checking cache: ${err.message}`);
+      console.warn(`⚠️ [Cache Middleware] Tag resolver failed: ${err.message}`);
       return next();
     }
-  };
-}
+    dependencyTags = [cacheTags.orgFlush(tag, orgId), ...dependencyTags.filter(Boolean)];
 
-/**
- * Route-Level Invalidation Middleware
- *
- * Automatically flushes cached patterns on successful mutation routes (POST, PUT, PATCH, DELETE)
- *
- * @param {string|string[]} tags Tag or list of tags to invalidate (e.g. ['tickets'], ['balance'])
- * @returns {import('express').RequestHandler}
- */
-export function invalidateCache(tags = []) {
-  const tagList = Array.isArray(tags) ? tags : [tags];
+    const versions = await getTagVersions(dependencyTags);
+    if (versions === null) {
+      cacheStats.skips++;
+      res.setHeader('X-Cache', 'SKIP');
+      return next();
+    }
 
-  return function invalidateCacheMiddleware(req, res, next) {
-    const orgId = req.user?.orgId;
+    const cacheKey = `${baseKey}|v${versions.join('.')}`;
+    res.setHeader('X-Cache-Key', cacheKey);
+
+    const cached = await getCache(cacheKey);
+    if (cached && cached.body !== undefined) {
+      cacheStats.hits++;
+      res.setHeader('X-Cache', 'HIT');
+      res.setHeader('Age', Math.max(0, Math.floor((Date.now() - (cached.storedAt || Date.now())) / 1000)));
+      return res.status(cached.status || 200).json(cached.body);
+    }
+
+    cacheStats.misses++;
+    res.setHeader('X-Cache', 'MISS');
 
     const originalJson = res.json.bind(res);
-    res.json = function (body) {
+    res.json = function cacheCapturingJson(body) {
       res.json = originalJson;
-
-      // Invalidate only if mutation was successful (2xx) and tenant orgId is known
-      if (res.statusCode >= 200 && res.statusCode < 300 && orgId) {
-        for (const tag of tagList) {
-          invalidateHttpCache(orgId, tag).catch((err) => {
-            console.warn(`⚠️ [Cache Invalidation] Failed to invalidate tag "${tag}": ${err.message}`);
-          });
-        }
+      const ok = res.statusCode >= 200 && res.statusCode < 300 && body && body.success !== false;
+      if (ok) {
+        // Fire-and-forget: never delay the response for the cache write
+        setCache(cacheKey, { status: res.statusCode, body, storedAt: Date.now() }, ttl);
       }
-
       return originalJson(body);
     };
 
@@ -137,27 +113,32 @@ export function invalidateCache(tags = []) {
 }
 
 /**
- * Programmatic HTTP Cache Invalidation Helper
+ * Route-level invalidation for routes that only mutate through REST.
+ * Bumps tags once the response finished with 2xx.
  *
- * Flushes all route-level cached entries for an organization and resource tag
+ * Prefer the service-level helpers (invalidateTicketCaches, invalidateBalanceCaches)
+ * when the same mutation can also happen from the copilot chat / HITL approvals.
  *
- * @param {string} orgId Tenant organization ID
- * @param {string} tag Resource tag (e.g. 'tickets', 'balance')
- * @returns {Promise<boolean>}
+ * @param {(req, res) => string[]} tagsResolver
  */
-export async function invalidateHttpCache(orgId, tag) {
-  if (!orgId || !tag) return false;
+export function invalidateCache(tagsResolver) {
+  return function invalidateCacheMiddleware(req, res, next) {
+    res.on('finish', () => {
+      if (res.statusCode < 200 || res.statusCode >= 300) return;
+      try {
+        const tagList = typeof tagsResolver === 'function' ? tagsResolver(req, res) : tagsResolver;
+        invalidateTags(Array.isArray(tagList) ? tagList : [tagList]);
+      } catch (err) {
+        console.warn(`⚠️ [Cache Invalidation] ${err.message}`);
+      }
+    });
+    next();
+  };
+}
 
-  const patterns = [
-    `cache:http:${orgId}:${tag}:*`,
-    `cache:${tag}:${orgId}:*`, // legacy key pattern cleanup
-  ];
-
-  try {
-    await Promise.all(patterns.map((p) => invalidateCachePattern(p)));
-    return true;
-  } catch (err) {
-    console.warn(`⚠️ [Cache Helper] Invalidation failed for tag "${tag}": ${err.message}`);
-    return false;
-  }
+/**
+ * Flush every cached response of a resource for an org (kept for backwards compatibility).
+ */
+export function invalidateHttpCache(orgId, resource) {
+  return invalidateResourceForOrg(orgId, resource);
 }

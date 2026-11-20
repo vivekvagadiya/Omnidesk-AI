@@ -1,10 +1,11 @@
 import crypto from 'node:crypto';
 import { Ticket, TICKET_CATEGORIES, TICKET_PRIORITIES } from '../models/Ticket.model.js';
 import { successResponse, errorResponse } from '../utils/apiResponse.js';
-import { getRedisClient } from '../config/redis.js';
-import { invalidateHttpCache } from '../middlewares/cache.middleware.js';
+import { invalidateTicketCaches } from '../services/cache/cache.service.js';
+import { enqueueNotification } from '../services/queue/notificationWorker.js';
 
-const ADMIN_ROLES = ['super_admin', 'org_admin', 'hr_admin', 'it_admin'];
+// Exported so the route-level cache resolves tags with the same visibility rules
+export const ADMIN_ROLES = ['super_admin', 'org_admin', 'hr_admin', 'it_admin'];
 
 /**
  * Controller: List Tickets
@@ -138,30 +139,19 @@ export async function createTicket(req, res) {
       },
     });
 
-    // Invalidate cached tickets for this tenant so the user sees their new ticket immediately
-    await invalidateHttpCache(user.orgId, 'tickets');
+    // Refresh this user's ticket lists and the org-wide admin view
+    await invalidateTicketCaches({ orgId: user.orgId, userId: user.userId });
 
-    // Enqueue notification to Redis queue
-    try {
-      const redis = getRedisClient();
-      if (redis && redis.isOpen) {
-        await redis.lPush(
-          'queue:notifications',
-          JSON.stringify({
-            event: 'TICKET_CREATED',
-            ticketId,
-            userId: user.userId,
-            orgId: user.orgId,
-            title: title.trim(),
-            category: normalizedCategory,
-            priority: normalizedPriority,
-            createdAt: new Date().toISOString(),
-          })
-        );
-      }
-    } catch (queueErr) {
-      console.warn(`⚠️ [Notification Queue] Failed to push notification: ${queueErr.message}`);
-    }
+    await enqueueNotification({
+      event: 'TICKET_CREATED',
+      ticketId,
+      userId: user.userId,
+      orgId: user.orgId,
+      title: title.trim(),
+      category: normalizedCategory,
+      priority: normalizedPriority,
+      createdAt: new Date().toISOString(),
+    });
 
     return successResponse(res, {
       statusCode: 201,
