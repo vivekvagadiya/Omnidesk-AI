@@ -1,8 +1,8 @@
-import { connectDB, disconnectDB } from './src/config/db.js';
-import { connectRedis } from './src/config/redis.js';
-import { User } from './src/models/User.model.js';
-import { Ticket } from './src/models/Ticket.model.js';
-import { Asset } from './src/models/Asset.model.js';
+import { connectDB, disconnectDB } from '../src/config/db.js';
+import { connectRedis } from '../src/config/redis.js';
+import { User } from '../src/models/User.model.js';
+import { Ticket } from '../src/models/Ticket.model.js';
+import { Asset } from '../src/models/Asset.model.js';
 import {
   generateActionId,
   buildApprovalCardMetadata,
@@ -16,7 +16,7 @@ import {
   ActionNotFoundError,
   ActionExpiredError,
   UnauthorizedActionError,
-} from './src/services/tools/hitlGatekeeper.service.js';
+} from '../src/services/tools/hitlGatekeeper.service.js';
 
 console.log('================================================================');
 console.log('🛡️  OMNIDESK AI — SPRINT 3 MODULE 4: HITL ACTION GATEKEEPER');

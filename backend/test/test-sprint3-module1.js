@@ -8,9 +8,9 @@ import {
   FALLBACK_MODEL,
   MAX_SESSION_MESSAGES,
   SESSION_TTL_SECONDS,
-} from "./src/services/ai/orchestrator.service.js";
-import { generateTestEmbedding } from "./src/services/rag/ingestion.service.js";
-import { connectRedis, disconnectRedis } from "./src/config/redis.js";
+} from "../src/services/ai/orchestrator.service.js";
+import { generateTestEmbedding } from "../src/services/rag/ingestion.service.js";
+import { connectRedis, disconnectRedis } from "../src/config/redis.js";
 
 console.log("================================================================");
 console.log(

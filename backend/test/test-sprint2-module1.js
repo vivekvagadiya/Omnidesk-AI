@@ -1,4 +1,4 @@
-import { getQdrantClient, checkQdrantHealth } from './src/config/qdrant.js';
+import { getQdrantClient, checkQdrantHealth } from '../src/config/qdrant.js';
 import {
   POLICY_COLLECTION_NAME,
   VECTOR_DIMENSION,
@@ -7,8 +7,8 @@ import {
   initPolicyCollection,
   upsertPolicyVectors,
   searchPolicyVectors,
-} from './src/services/rag/qdrant.service.js';
-import { config } from './src/config/environment.js';
+} from '../src/services/rag/qdrant.service.js';
+import { config } from '../src/config/environment.js';
 
 console.log('================================================================');
 console.log('🧠 OMNIDESK AI — SPRINT 2 MODULE 1: QDRANT VECTOR SETUP VERIFICATION');

@@ -3,10 +3,10 @@ import {
   maskPII,
   unmaskPII,
   PRESERVED_DOMAIN,
-} from './src/services/ai/piiMasker.service.js';
-import { runCopilotTurn } from './src/services/ai/orchestrator.service.js';
-import { generateTestEmbedding } from './src/services/rag/ingestion.service.js';
-import { connectRedis, disconnectRedis } from './src/config/redis.js';
+} from '../src/services/ai/piiMasker.service.js';
+import { runCopilotTurn } from '../src/services/ai/orchestrator.service.js';
+import { generateTestEmbedding } from '../src/services/rag/ingestion.service.js';
+import { connectRedis, disconnectRedis } from '../src/config/redis.js';
 
 console.log('================================================================');
 console.log('🛡️  OMNIDESK AI — SPRINT 3 MODULE 2: PII MASKING & SURROGATE TOKENIZATION');

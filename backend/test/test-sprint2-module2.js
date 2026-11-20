@@ -8,7 +8,7 @@ import {
   IngestionValidationError,
   MAX_FILE_SIZE_BYTES,
   VECTOR_DIMENSION,
-} from './src/services/rag/ingestion.service.js';
+} from '../src/services/rag/ingestion.service.js';
 
 console.log('================================================================');
 console.log('📄 OMNIDESK AI — SPRINT 2 MODULE 2: DOCUMENT INGESTION VERIFICATION');

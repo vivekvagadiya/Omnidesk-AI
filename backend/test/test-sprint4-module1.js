@@ -1,28 +1,28 @@
-import app from './src/app.js';
-import { connectDB, disconnectDB } from './src/config/db.js';
-import { connectRedis } from './src/config/redis.js';
-import { generateTokens } from './src/utils/jwt.js';
-import { User } from './src/models/User.model.js';
-import { Ticket } from './src/models/Ticket.model.js';
+import app from '../src/app.js';
+import { connectDB, disconnectDB } from '../src/config/db.js';
+import { connectRedis } from '../src/config/redis.js';
+import { generateTokens } from '../src/utils/jwt.js';
+import { User } from '../src/models/User.model.js';
+import { Ticket } from '../src/models/Ticket.model.js';
 import {
   initSSE,
   sendSSE,
   closeSSE,
-} from './src/utils/sse.js';
+} from '../src/utils/sse.js';
 import {
   streamCopilotTurn,
   detectToolIntent,
-} from './src/services/ai/orchestrator.service.js';
+} from '../src/services/ai/orchestrator.service.js';
 import {
   stageActionToken,
   ACTION_TYPES,
-} from './src/services/tools/hitlGatekeeper.service.js';
+} from '../src/services/tools/hitlGatekeeper.service.js';
 import {
   streamChat,
   approveAction,
   rejectAction,
   getActionDetails,
-} from './src/controllers/copilot.controller.js';
+} from '../src/controllers/copilot.controller.js';
 
 console.log('================================================================');
 console.log('🚀 OMNIDESK AI — SPRINT 4 MODULE 1: SSE STREAMING & ACTION API');

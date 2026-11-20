@@ -1,32 +1,32 @@
 import bcrypt from 'bcryptjs';
-import { Organization } from './src/models/Organization.model.js';
-import { User, USER_ROLES } from './src/models/User.model.js';
-import { Ticket } from './src/models/Ticket.model.js';
-import { Asset } from './src/models/Asset.model.js';
+import { Organization } from '../src/models/Organization.model.js';
+import { User, USER_ROLES } from '../src/models/User.model.js';
+import { Ticket } from '../src/models/Ticket.model.js';
+import { Asset } from '../src/models/Asset.model.js';
 import {
   generateToken,
   verifyToken,
   generateTokens,
   verifyAccessToken,
   verifyRefreshToken,
-} from './src/utils/jwt.js';
+} from '../src/utils/jwt.js';
 import {
   authenticateJwt,
   requireRoles,
   requireSameOrg,
-} from './src/middlewares/auth.middleware.js';
+} from '../src/middlewares/auth.middleware.js';
 import {
   hashPassword,
   verifyPassword,
   validatePasswordStrength,
-} from './src/services/auth.service.js';
+} from '../src/services/auth.service.js';
 import {
   validateSchema,
   loginSchema,
   registerSchema,
   refreshTokenSchema,
-} from './src/validators/auth.validator.js';
-import { authLimiter } from './src/middlewares/rateLimiter.middleware.js';
+} from '../src/validators/auth.validator.js';
+import { authLimiter } from '../src/middlewares/rateLimiter.middleware.js';
 import {
   register,
   login,
@@ -34,7 +34,7 @@ import {
   logout,
   getMe,
   forgotPasswordStub,
-} from './src/controllers/auth.controller.js';
+} from '../src/controllers/auth.controller.js';
 
 console.log('================================================================');
 console.log('🛡️  OMNIDESK AI — SPRINT 1 ENTERPRISE AUTH & ARCHITECTURE VERIFICATION');

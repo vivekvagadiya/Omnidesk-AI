@@ -1,17 +1,17 @@
 import crypto from 'node:crypto';
-import { connectDB, disconnectDB } from './src/config/db.js';
-import { connectRedis } from './src/config/redis.js';
-import { User } from './src/models/User.model.js';
-import { Ticket } from './src/models/Ticket.model.js';
-import { uploadDocument } from './src/controllers/copilot.controller.js';
-import { getTickets, createTicket } from './src/controllers/ticket.controller.js';
-import { getLeaveBalance } from './src/controllers/profile.controller.js';
+import { connectDB, disconnectDB } from '../src/config/db.js';
+import { connectRedis } from '../src/config/redis.js';
+import { User } from '../src/models/User.model.js';
+import { Ticket } from '../src/models/Ticket.model.js';
+import { uploadDocument } from '../src/controllers/copilot.controller.js';
+import { getTickets, createTicket } from '../src/controllers/ticket.controller.js';
+import { getLeaveBalance } from '../src/controllers/profile.controller.js';
 import {
   enqueueNotification,
   processNotification,
   startNotificationWorker,
   stopNotificationWorker,
-} from './src/services/queue/notificationWorker.js';
+} from '../src/services/queue/notificationWorker.js';
 
 console.log('================================================================');
 console.log('🚀 OMNIDESK AI — SPRINT 4 MODULE 2: INGESTION, TICKETS & WORKER');

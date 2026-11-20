@@ -4,8 +4,8 @@ import {
   SIMILARITY_THRESHOLD,
   RetrievalError,
   ZERO_HALLUCINATION_FALLBACK,
-} from './src/services/rag/retrieval.service.js';
-import { generateTestEmbedding } from './src/services/rag/ingestion.service.js';
+} from '../src/services/rag/retrieval.service.js';
+import { generateTestEmbedding } from '../src/services/rag/ingestion.service.js';
 
 console.log('================================================================');
 console.log('🎯 OMNIDESK AI — SPRINT 2 MODULE 3: RETRIEVAL & ZERO-HALLUCINATION GUARDRAIL');

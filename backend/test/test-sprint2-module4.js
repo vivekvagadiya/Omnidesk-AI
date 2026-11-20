@@ -4,7 +4,7 @@ import {
   extractReferencedCitations,
   extractHighlightSnippet,
   packageResponseWithCitations,
-} from './src/services/rag/citation.service.js';
+} from '../src/services/rag/citation.service.js';
 
 console.log('================================================================');
 console.log('📚 OMNIDESK AI — SPRINT 2 MODULE 4: CITATION FORMATTER VERIFICATION');

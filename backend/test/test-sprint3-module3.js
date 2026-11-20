@@ -1,8 +1,8 @@
-import { connectDB, disconnectDB } from './src/config/db.js';
-import { connectRedis, getRedisClient } from './src/config/redis.js';
-import { User } from './src/models/User.model.js';
-import { Ticket } from './src/models/Ticket.model.js';
-import { Asset } from './src/models/Asset.model.js';
+import { connectDB, disconnectDB } from '../src/config/db.js';
+import { connectRedis, getRedisClient } from '../src/config/redis.js';
+import { User } from '../src/models/User.model.js';
+import { Ticket } from '../src/models/Ticket.model.js';
+import { Asset } from '../src/models/Asset.model.js';
 import {
   searchPolicies,
   getLeaveBalance,
@@ -17,7 +17,7 @@ import {
   CONSEQUENTIAL_TOOLS,
   InvalidToolError,
   ToolExecutionError,
-} from './src/services/tools/toolRegistry.service.js';
+} from '../src/services/tools/toolRegistry.service.js';
 import {
   stageActionToken,
   getStagedAction,
@@ -26,7 +26,7 @@ import {
   ACTION_TYPES,
   ActionNotFoundError,
   UnauthorizedActionError,
-} from './src/services/tools/hitlGatekeeper.service.js';
+} from '../src/services/tools/hitlGatekeeper.service.js';
 
 console.log('================================================================');
 console.log('🛠️  OMNIDESK AI — SPRINT 3 MODULE 3: 6 CORE TOOLS & HITL GATEKEEPER');
