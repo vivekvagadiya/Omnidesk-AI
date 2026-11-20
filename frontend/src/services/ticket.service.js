@@ -1,0 +1,28 @@
+import { apiClient } from './apiClient';
+
+/**
+ * Ticket Management Service
+ * Communicates with /api/tickets endpoints
+ */
+export const ticketService = {
+  /**
+   * List tickets with optional filters and pagination
+   */
+  async getTickets(params = {}) {
+    const response = await apiClient.get('/tickets', { params });
+    return response.data.data;
+  },
+
+  /**
+   * Create a new support ticket
+   */
+  async createTicket({ title, description, category, priority }) {
+    const response = await apiClient.post('/tickets', {
+      title,
+      description,
+      category,
+      priority,
+    });
+    return response.data.data;
+  },
+};

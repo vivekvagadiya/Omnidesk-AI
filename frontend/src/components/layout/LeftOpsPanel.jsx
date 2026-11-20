@@ -16,7 +16,14 @@ import {
 
 export function LeftOpsPanel() {
   const { user } = useAuth();
-  const { leaveBalance, tickets, uploadPolicyDocument, refetchOps } = useCopilot();
+  const {
+    leaveBalance,
+    tickets,
+    ticketScope,
+    setTicketScope,
+    uploadPolicyDocument,
+    refetchOps,
+  } = useCopilot();
   const [isTicketModalOpen, setIsTicketModalOpen] = useState(false);
 
   // Document upload state
@@ -155,6 +162,34 @@ export function LeftOpsPanel() {
               <Plus className="w-3 h-3" /> New
             </button>
           </div>
+
+          {/* Manager / Admin Scope Toggle (Sprint 5 Deliverable) */}
+          {user?.role && user.role !== 'employee' && (
+            <div className="flex rounded-lg bg-zinc-900/90 p-0.5 border border-zinc-800 text-[10px] font-mono">
+              <button
+                type="button"
+                onClick={() => setTicketScope('mine')}
+                className={`flex-1 py-1 rounded text-center transition-colors ${
+                  ticketScope === 'mine'
+                    ? 'bg-zinc-800 text-zinc-100 font-medium'
+                    : 'text-zinc-500 hover:text-zinc-300'
+                }`}
+              >
+                My Tickets
+              </button>
+              <button
+                type="button"
+                onClick={() => setTicketScope('all')}
+                className={`flex-1 py-1 rounded text-center transition-colors ${
+                  ticketScope === 'all'
+                    ? 'bg-zinc-800 text-zinc-100 font-medium'
+                    : 'text-zinc-500 hover:text-zinc-300'
+                }`}
+              >
+                Team / Org
+              </button>
+            </div>
+          )}
 
           <div className="space-y-1.5 max-h-48 overflow-y-auto pr-0.5">
             {tickets && tickets.length > 0 ? (

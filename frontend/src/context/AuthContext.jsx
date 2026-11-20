@@ -1,5 +1,11 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import { api, setStoredSession, clearStoredSession, getStoredAccessToken, getStoredUser } from '../services/api';
+import {
+  authService,
+  setStoredSession,
+  clearStoredSession,
+  getStoredAccessToken,
+  getStoredUser,
+} from '../services';
 
 const AuthContext = createContext(null);
 
@@ -60,8 +66,8 @@ export function AuthProvider({ children }) {
     setError(null);
 
     try {
-      const response = await api.post('/auth/login', { email, password });
-      const { user: userData, accessToken: token, refreshToken } = response.data.data;
+      const data = await authService.login({ email, password });
+      const { user: userData, accessToken: token, refreshToken } = data;
 
       setStoredSession({
         accessToken: token,
@@ -86,7 +92,7 @@ export function AuthProvider({ children }) {
     setError(null);
 
     try {
-      await api.post('/auth/register', userData);
+      await authService.register(userData);
       // Seamless auto-login on successful registration
       return await login(userData.email, userData.password);
     } catch (err) {
@@ -100,9 +106,9 @@ export function AuthProvider({ children }) {
 
   const logout = async () => {
     try {
-      await api.post('/auth/logout');
+      await authService.logout();
     } catch {
-      // Ignore cleanup error
+      // Ignore network cleanup error
     } finally {
       clearStoredSession();
       setUser(null);

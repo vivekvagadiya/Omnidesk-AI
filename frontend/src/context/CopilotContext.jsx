@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import { api, getStoredAccessToken } from '../services/api';
+import { copilotService, ticketService, profileService } from '../services';
 import { useAuth } from './AuthContext';
 
 const CopilotContext = createContext(null);
@@ -18,7 +18,7 @@ export function CopilotProvider({ children }) {
     },
   ]);
   const [isStreaming, setIsStreaming] = useState(false);
-  const [activeToolPill, setActiveToolPill] = useState(null); // { tool, status, statusPill }
+  const [activeToolPill, setActiveToolPill] = useState(null); // { tool, status, pill }
 
   // Evidence Drawer state
   const [citationsList, setCitationsList] = useState([]);
@@ -28,6 +28,7 @@ export function CopilotProvider({ children }) {
   // Operations state
   const [leaveBalance, setLeaveBalance] = useState({ casual: 12, sick: 7, maternity: 90 });
   const [tickets, setTickets] = useState([]);
+  const [ticketScope, setTicketScope] = useState('mine'); // 'mine' | 'all'
   const [isLoadingOps, setIsLoadingOps] = useState(false);
   const [notificationsCount, setNotificationsCount] = useState(2);
 
@@ -35,9 +36,9 @@ export function CopilotProvider({ children }) {
   const fetchLeaveBalance = useCallback(async () => {
     if (!user) return;
     try {
-      const res = await api.get('/profile/balance');
-      if (res.data?.data?.leaveBalances) {
-        setLeaveBalance(res.data.data.leaveBalances);
+      const data = await profileService.getLeaveBalance();
+      if (data?.leaveBalances) {
+        setLeaveBalance(data.leaveBalances);
       }
     } catch (err) {
       console.warn('Could not fetch leave balance:', err.message);
@@ -45,17 +46,44 @@ export function CopilotProvider({ children }) {
   }, [user]);
 
   // Fetch tickets
-  const fetchTickets = useCallback(async () => {
-    if (!user) return;
-    try {
-      const res = await api.get('/tickets?limit=10');
-      if (res.data?.data?.tickets) {
-        setTickets(res.data.data.tickets);
+  const fetchTickets = useCallback(
+    async (scope = ticketScope) => {
+      if (!user) return;
+      try {
+        const isManagerOrAdmin = ['manager', 'org_admin', 'super_admin', 'hr_admin', 'it_admin'].includes(
+          user?.role
+        );
+        const params = { limit: 25 };
+        if (!isManagerOrAdmin || scope !== 'all') {
+          params.userId = user.userId;
+        }
+
+        const data = await ticketService.getTickets(params);
+        if (data?.tickets) {
+          setTickets(data.tickets);
+        }
+      } catch (err) {
+        console.warn('Could not fetch tickets:', err.message);
       }
-    } catch (err) {
-      console.warn('Could not fetch tickets:', err.message);
-    }
-  }, [user]);
+    },
+    [user, ticketScope]
+  );
+
+  // Clear chat session and start fresh
+  const clearChat = () => {
+    const newSessionId = `sess_${user?.userId || 'guest'}_${Date.now().toString(36)}`;
+    setSessionId(newSessionId);
+    setMessages([
+      {
+        id: 'welcome_' + Date.now(),
+        sender: 'assistant',
+        text: `Session reset. I am ready to help you with company policies, leave applications, or support tickets.`,
+        timestamp: new Date().toISOString(),
+        citations: [],
+      },
+    ]);
+    setActiveToolPill(null);
+  };
 
   // Initial data load when user logs in
   useEffect(() => {
@@ -84,7 +112,7 @@ export function CopilotProvider({ children }) {
     setIsCitationDrawerOpen(false);
   };
 
-  // SSE Chat Turn Execution
+  // SSE Chat Turn Execution via copilotService
   const sendMessage = async (rawMessage) => {
     const text = rawMessage?.trim();
     if (!text || isStreaming) return;
@@ -114,61 +142,11 @@ export function CopilotProvider({ children }) {
     setIsStreaming(true);
     setActiveToolPill(null);
 
-    const token = getStoredAccessToken();
-
     try {
-      const response = await fetch('/api/copilot/chat', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          message: text,
-          sessionId,
-        }),
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.message || `Server error (${response.status})`);
-      }
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder('utf-8');
-      let buffer = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n\n');
-        buffer = lines.pop(); // Keep remainder in buffer
-
-        for (const block of lines) {
-          const trimmed = block.trim();
-          if (!trimmed) continue;
-
-          let event = 'message';
-          let dataStr = '';
-
-          const rows = trimmed.split('\n');
-          for (const row of rows) {
-            if (row.startsWith('event: ')) event = row.replace('event: ', '').trim();
-            else if (row.startsWith('data: ')) dataStr = row.replace('data: ', '').trim();
-          }
-
-          if (!dataStr) continue;
-
-          let payload = null;
-          try {
-            payload = JSON.parse(dataStr);
-          } catch {
-            payload = dataStr;
-          }
-
-          // Handle structured SSE events
+      await copilotService.streamChat({
+        message: text,
+        sessionId,
+        onEvent: (event, payload) => {
           if (event === 'tool_call') {
             setActiveToolPill({
               tool: payload.tool,
@@ -235,8 +213,8 @@ export function CopilotProvider({ children }) {
               )
             );
           }
-        }
-      }
+        },
+      });
     } catch (err) {
       setMessages((prev) =>
         prev.map((msg) =>
@@ -259,7 +237,7 @@ export function CopilotProvider({ children }) {
   // HITL Action Approval
   const approveAction = async (actionId) => {
     try {
-      const res = await api.post('/copilot/action/approve', { actionId });
+      const res = await copilotService.approveAction(actionId);
 
       // Update message card state
       setMessages((prev) =>
@@ -270,7 +248,7 @@ export function CopilotProvider({ children }) {
               stagedAction: {
                 ...msg.stagedAction,
                 status: 'APPROVED',
-                result: res.data.data,
+                result: res.data,
               },
             };
           }
@@ -281,7 +259,7 @@ export function CopilotProvider({ children }) {
       // Silently refresh profile balance and tickets live
       await Promise.all([fetchLeaveBalance(), fetchTickets()]);
       setNotificationsCount((c) => c + 1);
-      return res.data;
+      return res;
     } catch (err) {
       const msg = err.response?.data?.message || err.message;
       alert(`Approval Failed: ${msg}`);
@@ -292,7 +270,7 @@ export function CopilotProvider({ children }) {
   // HITL Action Rejection
   const rejectAction = async (actionId) => {
     try {
-      const res = await api.post('/copilot/action/reject', { actionId });
+      const res = await copilotService.rejectAction(actionId);
 
       setMessages((prev) =>
         prev.map((msg) => {
@@ -308,7 +286,7 @@ export function CopilotProvider({ children }) {
           return msg;
         })
       );
-      return res.data;
+      return res;
     } catch (err) {
       const msg = err.response?.data?.message || err.message;
       alert(`Rejection Failed: ${msg}`);
@@ -318,22 +296,16 @@ export function CopilotProvider({ children }) {
 
   // Direct Ticket Creation
   const createNewTicket = async ({ title, description, category, priority }) => {
-    const res = await api.post('/tickets', { title, description, category, priority });
+    const res = await ticketService.createTicket({ title, description, category, priority });
     await fetchTickets();
     setNotificationsCount((c) => c + 1);
-    return res.data;
+    return res;
   };
 
   // Policy Document Upload
   const uploadPolicyDocument = async (file, department) => {
-    const formData = new FormData();
-    formData.append('file', file);
-    formData.append('department', department || user?.department || 'GENERAL');
-
-    const res = await api.post('/copilot/documents', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    });
-    return res.data;
+    const res = await copilotService.uploadDocument(file, department || user?.department || 'GENERAL');
+    return res;
   };
 
   return (
@@ -345,6 +317,7 @@ export function CopilotProvider({ children }) {
         isStreaming,
         activeToolPill,
         sendMessage,
+        clearChat,
         // Citations
         citationsList,
         selectedCitation,
@@ -354,6 +327,11 @@ export function CopilotProvider({ children }) {
         // Ops & Actions
         leaveBalance,
         tickets,
+        ticketScope,
+        setTicketScope: (newScope) => {
+          setTicketScope(newScope);
+          fetchTickets(newScope);
+        },
         isLoadingOps,
         notificationsCount,
         approveAction,
