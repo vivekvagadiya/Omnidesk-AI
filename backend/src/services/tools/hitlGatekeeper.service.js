@@ -2,6 +2,8 @@ import crypto from 'node:crypto';
 import { getRedisClient } from '../../config/redis.js';
 import { User } from '../../models/User.model.js';
 import { Ticket } from '../../models/Ticket.model.js';
+import { invalidateCacheKey, invalidateCachePattern } from '../cache/cache.service.js';
+import { invalidateHttpCache } from '../../middlewares/cache.middleware.js';
 import { Asset } from '../../models/Asset.model.js';
 
 export const ACTION_TOKEN_TTL_SECONDS = 900; // 15 minutes TTL
@@ -432,6 +434,10 @@ export async function consumeActionToken({
       ticketId: leaveTicket.ticketId,
       ticketStatus: leaveTicket.status,
     };
+
+    // Invalidate cached balance and tickets for tenant (both route-level and legacy)
+    await invalidateHttpCache(staged.orgId, 'balance');
+    await invalidateHttpCache(staged.orgId, 'tickets');
   } else if (staged.type === ACTION_TYPES.REQUEST_HARDWARE_UPGRADE) {
     const { assetType, preferredModel, reason, urgency } = staged.payload;
 
@@ -458,6 +464,9 @@ export async function consumeActionToken({
         confirmedAt: new Date().toISOString(),
       },
     });
+
+    // Invalidate cached tickets for tenant (both route-level and legacy)
+    await invalidateHttpCache(staged.orgId, 'tickets');
 
     executionResult = {
       type: ACTION_TYPES.REQUEST_HARDWARE_UPGRADE,

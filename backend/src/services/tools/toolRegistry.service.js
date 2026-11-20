@@ -7,6 +7,8 @@ import {
   stageActionToken,
   ACTION_TYPES,
 } from './hitlGatekeeper.service.js';
+import { invalidateCachePattern } from '../cache/cache.service.js';
+import { invalidateHttpCache } from '../../middlewares/cache.middleware.js';
 
 export const SAFE_TOOLS = ['searchPolicies', 'getLeaveBalance', 'getMyTickets'];
 export const MUTATION_TOOLS = ['createTicket'];
@@ -219,6 +221,9 @@ export async function createTicket(args = {}, context = {}) {
     priority: normalizedPriority,
     status: 'OPEN',
   });
+
+  // Invalidate cached tickets for tenant (both route-level and legacy)
+  await invalidateHttpCache(user.orgId, 'tickets');
 
   return {
     tool: 'createTicket',

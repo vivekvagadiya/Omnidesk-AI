@@ -2,11 +2,13 @@ import crypto from 'node:crypto';
 import { Ticket, TICKET_CATEGORIES, TICKET_PRIORITIES } from '../models/Ticket.model.js';
 import { successResponse, errorResponse } from '../utils/apiResponse.js';
 import { getRedisClient } from '../config/redis.js';
+import { invalidateHttpCache } from '../middlewares/cache.middleware.js';
 
 const ADMIN_ROLES = ['super_admin', 'org_admin', 'hr_admin', 'it_admin'];
 
 /**
  * Controller: List Tickets
+ * Pure Controller Logic (Caching handled declaratively by route-level cacheResponse middleware)
  * GET /api/tickets
  */
 export async function getTickets(req, res) {
@@ -43,6 +45,7 @@ export async function getTickets(req, res) {
   const skip = (pageNum - 1) * limitNum;
 
   try {
+    // Query MongoDB
     let tickets = [];
     let total = 0;
 
@@ -52,18 +55,20 @@ export async function getTickets(req, res) {
       total = typeof Ticket.countDocuments === 'function' ? await Ticket.countDocuments(query) : tickets.length;
     }
 
+    const responseData = {
+      tickets: tickets || [],
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total: total || 0,
+        totalPages: Math.ceil(total / limitNum) || 1,
+      },
+    };
+
     return successResponse(res, {
       statusCode: 200,
       message: 'Tickets retrieved successfully.',
-      data: {
-        tickets: tickets || [],
-        pagination: {
-          page: pageNum,
-          limit: limitNum,
-          total: total || 0,
-          totalPages: Math.ceil(total / limitNum) || 1,
-        },
-      },
+      data: responseData,
     });
   } catch (err) {
     return errorResponse(res, {
@@ -75,6 +80,7 @@ export async function getTickets(req, res) {
 
 /**
  * Controller: Create Ticket
+ * Automatically flushes cached ticket lists for the tenant organization
  * POST /api/tickets
  */
 export async function createTicket(req, res) {
@@ -131,6 +137,9 @@ export async function createTicket(req, res) {
         createdAt: new Date().toISOString(),
       },
     });
+
+    // Invalidate cached tickets for this tenant so the user sees their new ticket immediately
+    await invalidateHttpCache(user.orgId, 'tickets');
 
     // Enqueue notification to Redis queue
     try {
