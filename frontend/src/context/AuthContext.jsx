@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
+import { toast } from 'sonner';
 import {
   authService,
   setStoredSession,
@@ -55,6 +56,9 @@ export function AuthProvider({ children }) {
       setUser(null);
       setAccessToken(null);
       setError('Your session has expired. Please sign in again.');
+      toast.warning('Session Expired', {
+        description: 'Your authentication token has expired. Please sign in again.',
+      });
     };
 
     window.addEventListener('omnidesk:session_expired', handleExpired);
@@ -81,6 +85,7 @@ export function AuthProvider({ children }) {
     } catch (err) {
       const msg = err.response?.data?.message || err.message || 'Login failed. Please verify credentials.';
       setError(msg);
+      toast.error('Authentication Failed', { description: msg });
       throw new Error(msg);
     } finally {
       setIsLoading(false);
@@ -93,11 +98,15 @@ export function AuthProvider({ children }) {
 
     try {
       await authService.register(userData);
+      toast.success('Registration Successful', {
+        description: `Account created for ${userData.email}. Logging in...`,
+      });
       // Seamless auto-login on successful registration
       return await login(userData.email, userData.password);
     } catch (err) {
       const msg = err.response?.data?.message || err.message || 'Registration failed.';
       setError(msg);
+      toast.error('Registration Failed', { description: msg });
       throw new Error(msg);
     } finally {
       setIsLoading(false);
@@ -113,6 +122,7 @@ export function AuthProvider({ children }) {
       clearStoredSession();
       setUser(null);
       setAccessToken(null);
+      toast.info('Signed Out', { description: 'You have been safely signed out.' });
     }
   };
 

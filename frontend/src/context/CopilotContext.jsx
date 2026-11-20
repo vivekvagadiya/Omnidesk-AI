@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import { toast } from 'sonner';
 import { copilotService, ticketService, profileService } from '../services';
 import { useAuth } from './AuthContext';
 
@@ -83,6 +84,7 @@ export function CopilotProvider({ children }) {
       },
     ]);
     setActiveToolPill(null);
+    toast.info('Chat session reset', { description: 'New conversational session initiated.' });
   };
 
   // Initial data load when user logs in
@@ -197,6 +199,9 @@ export function CopilotProvider({ children }) {
                   : msg
               )
             );
+            toast.warning('Action Required', {
+              description: payload.card?.title || 'A consequential action requires your approval.',
+            });
           } else if (event === 'done') {
             setActiveToolPill(null);
           } else if (event === 'error') {
@@ -212,6 +217,9 @@ export function CopilotProvider({ children }) {
                   : msg
               )
             );
+            toast.error('Response Error', {
+              description: payload.message || 'Error occurred while streaming response.',
+            });
           }
         },
       });
@@ -228,6 +236,7 @@ export function CopilotProvider({ children }) {
             : msg
         )
       );
+      toast.error('Connection Failed', { description: err.message });
     } finally {
       setIsStreaming(false);
       setActiveToolPill(null);
@@ -259,10 +268,15 @@ export function CopilotProvider({ children }) {
       // Silently refresh profile balance and tickets live
       await Promise.all([fetchLeaveBalance(), fetchTickets()]);
       setNotificationsCount((c) => c + 1);
+
+      toast.success('Action Approved & Executed', {
+        description: res.data?.message || 'Database mutation committed and notification queued.',
+      });
+
       return res;
     } catch (err) {
       const msg = err.response?.data?.message || err.message;
-      alert(`Approval Failed: ${msg}`);
+      toast.error('Approval Failed', { description: msg });
       throw err;
     }
   };
@@ -286,10 +300,15 @@ export function CopilotProvider({ children }) {
           return msg;
         })
       );
+
+      toast.info('Action Rejected', {
+        description: 'The staged consequential action was safely cancelled.',
+      });
+
       return res;
     } catch (err) {
       const msg = err.response?.data?.message || err.message;
-      alert(`Rejection Failed: ${msg}`);
+      toast.error('Rejection Failed', { description: msg });
       throw err;
     }
   };
@@ -299,6 +318,11 @@ export function CopilotProvider({ children }) {
     const res = await ticketService.createTicket({ title, description, category, priority });
     await fetchTickets();
     setNotificationsCount((c) => c + 1);
+
+    toast.success('Support Ticket Created', {
+      description: `Ticket ${res?.ticketId || ''} created under ${category}.`,
+    });
+
     return res;
   };
 

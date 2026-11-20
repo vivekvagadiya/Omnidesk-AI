@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { toast } from 'sonner';
 import { useAuth, PRESEEDED_ACCOUNTS } from '../../context/AuthContext';
 import {
   ShieldCheck,
@@ -6,8 +7,6 @@ import {
   Lock,
   Mail,
   User,
-  Building,
-  Briefcase,
   UserCheck,
 } from 'lucide-react';
 
@@ -30,7 +29,10 @@ export function LoginView() {
   const handleLoginSubmit = async (e) => {
     e.preventDefault();
     try {
-      await login(loginEmail, loginPassword);
+      const u = await login(loginEmail, loginPassword);
+      toast.success(`Welcome back, ${u.name || 'User'}!`, {
+        description: `Signed in as ${u.role} (${u.department})`,
+      });
     } catch {
       // Handled in AuthContext
     }
@@ -42,21 +44,28 @@ export function LoginView() {
     // Basic password strength check on client
     if (regPassword.length < 8) {
       setError?.('Password must be at least 8 characters long.');
+      toast.error('Validation Error', { description: 'Password must be at least 8 characters long.' });
       return;
     }
     if (!/[A-Z]/.test(regPassword) || !/[a-z]/.test(regPassword) || !/\d/.test(regPassword)) {
       setError?.('Password must contain at least 1 uppercase, 1 lowercase letter, and 1 number.');
+      toast.error('Validation Error', {
+        description: 'Password must contain at least 1 uppercase, 1 lowercase letter, and 1 number.',
+      });
       return;
     }
 
     try {
-      await register({
+      const u = await register({
         name: regName.trim(),
         email: regEmail.trim(),
         password: regPassword,
         orgId: regOrgId.trim() || 'abctech',
         department: regDepartment,
         role: regRole,
+      });
+      toast.success(`Welcome to OmniDesk, ${u.name}!`, {
+        description: `Registered and signed in as ${u.role}.`,
       });
     } catch {
       // Handled in AuthContext
@@ -68,7 +77,10 @@ export function LoginView() {
     setLoginEmail(acc.email);
     setLoginPassword('Password123!');
     try {
-      await login(acc.email, 'Password123!');
+      const u = await login(acc.email, 'Password123!');
+      toast.success(`Switched to ${acc.label}`, {
+        description: `Logged in as ${u.name} (${u.role})`,
+      });
     } catch {
       // Handled
     }

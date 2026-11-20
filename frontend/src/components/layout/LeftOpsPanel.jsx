@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { toast } from 'sonner';
 import { useAuth } from '../../context/AuthContext';
 import { useCopilot } from '../../context/CopilotContext';
 import { CreateTicketModal } from '../ops/CreateTicketModal';
@@ -22,7 +23,6 @@ export function LeftOpsPanel() {
     ticketScope,
     setTicketScope,
     uploadPolicyDocument,
-    refetchOps,
   } = useCopilot();
   const [isTicketModalOpen, setIsTicketModalOpen] = useState(false);
 
@@ -41,20 +41,28 @@ export function LeftOpsPanel() {
     setUploadStatus('uploading');
     setUploadMessage('Validating & chunking document into Qdrant...');
 
-    try {
-      const res = await uploadPolicyDocument(file, user?.department);
-      setUploadStatus('success');
-      setUploadMessage(
-        `Indexed ${res.data?.totalChunks || 1} chunk(s) into Qdrant (${res.data?.department}).`
-      );
-      setTimeout(() => {
-        setUploadStatus(null);
-        setUploadMessage('');
-      }, 5000);
-    } catch (err) {
-      setUploadStatus('error');
-      setUploadMessage(err.response?.data?.message || err.message || 'Upload failed');
-    }
+    const uploadPromise = uploadPolicyDocument(file, user?.department);
+
+    toast.promise(uploadPromise, {
+      loading: `Vectorizing & indexing ${file.name}...`,
+      success: (res) => {
+        setUploadStatus('success');
+        const count = res.data?.totalChunks || 1;
+        const msg = `Indexed ${count} chunk(s) into Qdrant (${res.data?.department || user?.department}).`;
+        setUploadMessage(msg);
+        setTimeout(() => {
+          setUploadStatus(null);
+          setUploadMessage('');
+        }, 5000);
+        return `Successfully indexed ${file.name} into Qdrant`;
+      },
+      error: (err) => {
+        setUploadStatus('error');
+        const msg = err.response?.data?.message || err.message || 'Upload failed';
+        setUploadMessage(msg);
+        return msg;
+      },
+    });
   };
 
   const getPriorityBadge = (priority) => {
@@ -163,7 +171,7 @@ export function LeftOpsPanel() {
             </button>
           </div>
 
-          {/* Manager / Admin Scope Toggle (Sprint 5 Deliverable) */}
+          {/* Manager / Admin Scope Toggle */}
           {user?.role && user.role !== 'employee' && (
             <div className="flex rounded-lg bg-zinc-900/90 p-0.5 border border-zinc-800 text-[10px] font-mono">
               <button
