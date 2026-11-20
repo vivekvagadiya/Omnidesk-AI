@@ -187,38 +187,90 @@ Wire all backend modules into high-performance Express REST endpoints, Server-Se
 
 ### Goal:
 
-Build the production React single-page application with modern styling, real-time SSE stream consumption, interactive citation drawer, and staged action approval cards.
+Build the production React single-page application (Vite + Tailwind CSS) tightly integrated with the Express API Gateway, real-time SSE streaming pipeline, interactive citation drawer, HITL confirmation cards, and live leave/ticket operations.
+
+### Frontend Architecture & Stack:
+
+- **Framework & Build:** React 18 + Vite SPA
+- **Styling & UI:** Tailwind CSS + Lucide React icon library
+- **Networking:** Native `fetch` with `ReadableStream` reader for SSE streaming; Axios with dual-token interceptor for REST APIs
+- **State Architecture:** React Context (`AuthContext`, `CopilotContext`, `NotificationContext`)
+- **Target Folder Structure (`frontend/src/`):**
+  - `components/layout/`: `AppLayout.jsx`, `Header.jsx`, `LeftOpsPanel.jsx`, `RightCitationDrawer.jsx`
+  - `components/chat/`: `ChatContainer.jsx`, `ChatMessage.jsx`, `ChatInput.jsx`, `ToolStatusPill.jsx`, `PromptChips.jsx`
+  - `components/cards/`: `HitlApprovalCard.jsx`, `TicketCard.jsx`, `LeaveBalanceCard.jsx`
+  - `components/ops/`: `TicketList.jsx`, `DocumentDropzone.jsx`, `CreateTicketModal.jsx`
+  - `context/`: `AuthContext.jsx`, `CopilotContext.jsx`
+  - `hooks/`: `useSSEChat.js`, `useTickets.js`, `useLeaveBalance.js`
+  - `services/`: `api.js`, `copilotService.js`
 
 ### Deliverables:
 
-1. **Authentication Views:**
-   - Corporate Email + Password Login screen.
-   - Forgot Password modal (clean visual stub).
-   - Persistent session storage (JWT in localStorage/sessionStorage).
-2. **3-Panel Enterprise Layout:**
-   - **Left Panel (Ops & Navigation):**
-     - User profile card (Name, Role, Department).
-     - Live Leave Balance widget (Casual, Sick).
-     - "My Active Tickets" list with priority badges.
-     - Document Upload Dropzone with validation feedback.
-   - **Center Panel (Interactive Agent Chat):**
-     - Message list with auto-scroll and markdown rendering.
-     - SSE typewriter streaming hook (`useSSEChat`).
-     - Live tool execution pill status.
-     - Staged Action Cards (`[Approve Action]` and `[Cancel]` buttons).
-     - Clear error state banner (network offline, timeout retry).
-   - **Right Panel (Context & Citations Drawer):**
-     - Sliding drawer that opens when user clicks an in-text citation badge `[1]`.
-     - Displays document title, section heading, match confidence score, and highlighted excerpt.
-3. **Manager View Enhancements:**
-   - Tab to review team members' pending requests.
+1. **Authentication & RBAC Session Management:**
+   - **Split-Screen Enterprise Login:** Corporate Email + Password inputs with instant error validation.
+   - **1-Click Role Switcher (Demo Accelerator):** Quick buttons to instantly log in as:
+     - 👤 **Sarah Jenkins** (`sarah.j@abctech.com`) — Standard Employee
+     - 👔 **David Miller** (`david.m@abctech.com`) — Engineering Manager
+     - 🛠️ **Marcus Vance** (`it.admin@abctech.com`) — IT Admin
+     - 📋 **Alex Morgan** (`hr.admin@abctech.com`) — HR Admin
+   - **Dual-Token Auth Interceptor:**
+     - Stores short-lived Access Token in memory/session and Refresh Token in storage.
+     - Transparently calls `POST /api/auth/refresh` on `401 Unauthorized` responses.
+     - Instant logout via `POST /api/auth/logout`.
+
+2. **3-Panel Enterprise Operations Layout:**
+   - **Left Panel (Ops, Navigation & Live Quotas):**
+     - **User Profile Banner:** Avatar, Full Name, Department badge, and RBAC Role chip.
+     - **Live Leave Quota Widget (`GET /api/profile/balance`):**
+       - Circular/bar progress cards for Casual (`X/12`), Sick (`Y/7`), and Maternity (`Z/90`).
+       - Auto-refreshes immediately when a leave action is approved.
+     - **Ticket Center (`GET /api/tickets` & `POST /api/tickets`):**
+       - Displays user tickets (or organization-wide tickets for Managers/Admins).
+       - Priority pills (`CRITICAL` red, `HIGH` orange, `MEDIUM` blue, `LOW` gray).
+       - Category chips (`IT_HARDWARE`, `HR_LEAVE`, `IT_ACCESS`, `GENERAL`).
+       - "+ New Ticket" modal button triggering direct ticket creation.
+     - **Policy Document Dropzone (`POST /api/copilot/documents`):**
+       - Visible to Admins & Managers.
+       - Drag-and-drop zone with client-side file size and extension checks (.pdf, .md, .txt).
+       - Ingestion progress bar and Qdrant indexing success toast.
+   - **Center Panel (Interactive Agent Chat & SSE Pipeline):**
+     - **Session Header:** Current Session ID indicator, Gemini 3.8 Flash model status badge, and "Clear Chat" action.
+     - **SSE Streaming Hook (`useSSEChat`):**
+       - Connects to `POST /api/copilot/chat` with JWT Bearer authentication.
+       - Handles incoming SSE stream events:
+         - `event: tool_call` ➔ Renders animated pulsing pill (`"🔍 Searching policy handbook..."` or `"🎫 Checking open tickets..."`).
+         - `event: token` ➔ Streams typewriter response smoothly using delta text.
+         - `event: citation` ➔ Converts `[1]`, `[2]` tags in text into clickable interactive citation badges.
+         - `event: action_required` ➔ Embeds full **HITL Staged Action Card**.
+         - `event: done` ➔ Finalizes turn, enables chat input, updates session memory.
+         - `event: error` ➔ Displays graceful inline retry banner.
+     - **Human-in-the-Loop (HITL) Action Confirmation Card:**
+       - Danger/Warning amber accent border with 15-minute live countdown timer (`expiresAt`).
+       - Structured details table: Leave Type, Start/End Dates, Days Deducted, Remaining Balance After Approval, Reason.
+       - Interactive action buttons:
+         - `[Approve & Execute]` ➔ Calls `POST /api/copilot/action/approve`; updates card to "✅ Confirmed & Executed" and triggers live balance decrement on Left Panel.
+         - `[Reject]` ➔ Calls `POST /api/copilot/action/reject`; cancels action with "❌ Cancelled" state.
+     - **Quick Prompt Chips:**
+       - One-click sample questions: *"What is our casual leave policy?"*, *"How many leaves do I have left?"*, *"Apply 2 days casual leave starting next Monday"*, *"Request MacBook Pro refresh"*.
+   - **Right Panel (Interactive Evidence & Citation Drawer):**
+     - Sliding context drawer that glides open when clicking any in-text citation badge `[1]`.
+     - **Document & Section Header:** Formatted label (e.g. `[Employee Handbook 2026 § Casual Leave Guidelines]`).
+     - **Match Confidence Meter:** Visual colored score bar (e.g. `92% Match Score`).
+     - **Highlighted Evidence Excerpt:** Verbatim chunk text with keyword background highlight.
+     - **Audit Metadata:** Organization ID, Department, Allowed RBAC Roles, and Qdrant Chunk Point ID.
+
+3. **Notification Center & Live Data Synchronization:**
+   - Top Header **Notification Bell (🔔)** with unread badge counter.
+   - Optimistic state updates and cross-component refetch hooks: Approving a leave action or creating a ticket automatically triggers `refetchBalance()` and `refetchTickets()` without full page reload.
+   - Manager View Tab: David (Manager) can toggle between "My Tickets" and "Team Requests" to review pending employee actions.
 
 ### Definition of Done (Acceptance Criteria):
 
-- [ ] Logging in displays Sarah's leave balances and tickets.
-- [ ] Asking a question streams response in real-time with clickable citation badges.
-- [ ] Clicking a citation badge opens the right-side drawer showing the exact chunk.
-- [ ] Requesting leave displays the Interactive Action Card; clicking "Approve" deducts balance live.
+- [ ] Logging in as Sarah (Employee) or Marcus (Admin) displays their specific identity, leave balances, and tickets.
+- [ ] Asking a policy question streams Gemini response tokens in real-time with pulsing tool status pills.
+- [ ] In-text citation badges (`[1]`, `[2]`) open the right-side evidence drawer displaying exact Qdrant text and confidence scores.
+- [ ] Asking to apply for leave renders the HITL Staged Action Card; clicking "Approve" deducts the balance live on the Left Panel.
+- [ ] Document dropzone uploads a policy file to `POST /api/copilot/documents` and confirms vector indexing into Qdrant.
 
 ---
 
