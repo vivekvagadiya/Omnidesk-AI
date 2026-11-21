@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { toast } from 'sonner';
 import { useAuth } from '../../context/AuthContext';
-import { useCopilot } from '../../context/CopilotContext';
+import { useLeaveBalanceQuery, useTicketsQuery, useUploadDocumentMutation } from '../../queries';
 import { CreateTicketModal } from '../ops/CreateTicketModal';
 import {
   Calendar,
@@ -17,14 +17,18 @@ import {
 
 export function LeftOpsPanel() {
   const { user } = useAuth();
-  const {
-    leaveBalance,
-    tickets,
-    ticketScope,
-    setTicketScope,
-    uploadPolicyDocument,
-  } = useCopilot();
+  const [ticketScope, setTicketScope] = useState('mine'); // 'mine' | 'all'
   const [isTicketModalOpen, setIsTicketModalOpen] = useState(false);
+
+  const balanceQuery = useLeaveBalanceQuery();
+  const leaveBalance = balanceQuery.data;
+  const ticketsQuery = useTicketsQuery({ scope: ticketScope });
+  const tickets = ticketsQuery.data?.tickets ?? [];
+  const uploadMutation = useUploadDocumentMutation();
+
+  // Show a dash until the real balance arrives (never fake default numbers)
+  const formatDays = (value) => (value ?? '—');
+  const quotaPercent = (value, total) => (value == null ? 0 : Math.min(100, (value / total) * 100));
 
   // Document upload state
   const [uploadStatus, setUploadStatus] = useState(null); // 'uploading' | 'success' | 'error'
@@ -41,7 +45,8 @@ export function LeftOpsPanel() {
     setUploadStatus('uploading');
     setUploadMessage('Validating & chunking document into Qdrant...');
 
-    const uploadPromise = uploadPolicyDocument(file, user?.department);
+    const uploadPromise = uploadMutation.mutateAsync({ file, department: user?.department });
+    e.target.value = ''; // allow re-uploading the same file
 
     toast.promise(uploadPromise, {
       loading: `Vectorizing & indexing ${file.name}...`,
@@ -58,7 +63,7 @@ export function LeftOpsPanel() {
       },
       error: (err) => {
         setUploadStatus('error');
-        const msg = err.response?.data?.message || err.message || 'Upload failed';
+        const msg = err.message || 'Upload failed';
         setUploadMessage(msg);
         return msg;
       },
@@ -117,7 +122,17 @@ export function LeftOpsPanel() {
             <span className="text-[11px] font-mono uppercase text-zinc-400 tracking-wider flex items-center gap-1.5">
               <Calendar className="w-3.5 h-3.5 text-zinc-400" /> Leave Balances
             </span>
-            <span className="text-[10px] font-mono text-zinc-400">2026 Quota</span>
+            <span className="text-[10px] font-mono text-zinc-400">
+              {balanceQuery.isError ? (
+                <button type="button" onClick={() => balanceQuery.refetch()} className="text-red-400 hover:text-red-300">
+                  Retry
+                </button>
+              ) : balanceQuery.isFetching ? (
+                'Syncing…'
+              ) : (
+                `${new Date().getFullYear()} Quota`
+              )}
+            </span>
           </div>
 
           <div className="grid grid-cols-2 gap-2">
@@ -126,14 +141,14 @@ export function LeftOpsPanel() {
               <div className="flex justify-between items-baseline mb-1">
                 <span className="text-[11px] text-zinc-400">Casual</span>
                 <span className="font-mono font-bold text-sm text-zinc-100">
-                  {leaveBalance?.casual ?? 12}
+                  {formatDays(leaveBalance?.casual)}
                   <span className="text-[10px] text-zinc-400 font-normal">/12d</span>
                 </span>
               </div>
               <div className="w-full h-1 bg-zinc-800 rounded-full overflow-hidden">
                 <div
                   className="h-full bg-emerald-500 rounded-full transition-all duration-300"
-                  style={{ width: `${Math.min(100, ((leaveBalance?.casual ?? 12) / 12) * 100)}%` }}
+                  style={{ width: `${quotaPercent(leaveBalance?.casual, 12)}%` }}
                 />
               </div>
             </div>
@@ -143,14 +158,14 @@ export function LeftOpsPanel() {
               <div className="flex justify-between items-baseline mb-1">
                 <span className="text-[11px] text-zinc-400">Sick</span>
                 <span className="font-mono font-bold text-sm text-zinc-100">
-                  {leaveBalance?.sick ?? 7}
+                  {formatDays(leaveBalance?.sick)}
                   <span className="text-[10px] text-zinc-400 font-normal">/7d</span>
                 </span>
               </div>
               <div className="w-full h-1 bg-zinc-800 rounded-full overflow-hidden">
                 <div
                   className="h-full bg-blue-500 rounded-full transition-all duration-300"
-                  style={{ width: `${Math.min(100, ((leaveBalance?.sick ?? 7) / 7) * 100)}%` }}
+                  style={{ width: `${quotaPercent(leaveBalance?.sick, 7)}%` }}
                 />
               </div>
             </div>
@@ -199,8 +214,27 @@ export function LeftOpsPanel() {
             </div>
           )}
 
-          <div className="space-y-1.5 max-h-48 overflow-y-auto pr-0.5">
-            {tickets && tickets.length > 0 ? (
+          <div
+            className={`space-y-1.5 max-h-48 overflow-y-auto pr-0.5 transition-opacity ${
+              ticketsQuery.isPlaceholderData ? 'opacity-60' : ''
+            }`}
+          >
+            {ticketsQuery.isPending ? (
+              <div className="p-4 rounded-lg border border-dashed border-zinc-800 text-center text-[11px] text-zinc-500">
+                Loading tickets…
+              </div>
+            ) : ticketsQuery.isError && tickets.length === 0 ? (
+              <div className="p-3 rounded-lg border border-red-900/60 bg-red-950/20 text-center text-[11px] text-red-300 space-y-1.5">
+                <div>{ticketsQuery.error.message}</div>
+                <button
+                  type="button"
+                  onClick={() => ticketsQuery.refetch()}
+                  className="font-mono text-[10px] underline hover:text-red-200"
+                >
+                  Try again
+                </button>
+              </div>
+            ) : tickets.length > 0 ? (
               tickets.map((t) => (
                 <div
                   key={t.ticketId || t._id}

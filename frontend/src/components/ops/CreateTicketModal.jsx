@@ -1,40 +1,41 @@
 import React, { useState } from 'react';
 import { useCopilot } from '../../context/CopilotContext';
+import { useCreateTicketMutation } from '../../queries';
 import { X, Tag, AlertTriangle } from 'lucide-react';
 
 export function CreateTicketModal({ isOpen, onClose }) {
-  const { createNewTicket } = useCopilot();
+  const { incrementNotifications } = useCopilot();
+  const createTicket = useCreateTicketMutation();
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [category, setCategory] = useState('IT_HARDWARE');
   const [priority, setPriority] = useState('MEDIUM');
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [error, setError] = useState(null);
+  const isSubmitting = createTicket.isPending;
+  const error = createTicket.error?.message || null;
 
   if (!isOpen) return null;
 
-  const handleSubmit = async (e) => {
+  const handleSubmit = (e) => {
     e.preventDefault();
-    if (!title.trim()) return;
+    if (!title.trim() || isSubmitting) return;
 
-    setIsSubmitting(true);
-    setError(null);
+    createTicket.mutate(
+      { title: title.trim(), description: description.trim(), category, priority },
+      {
+        onSuccess: () => {
+          incrementNotifications();
+          setTitle('');
+          setDescription('');
+          createTicket.reset();
+          onClose();
+        },
+      }
+    );
+  };
 
-    try {
-      await createNewTicket({
-        title: title.trim(),
-        description: description.trim(),
-        category,
-        priority,
-      });
-      setTitle('');
-      setDescription('');
-      onClose();
-    } catch (err) {
-      setError(err.response?.data?.message || err.message || 'Failed to submit ticket');
-    } finally {
-      setIsSubmitting(false);
-    }
+  const handleClose = () => {
+    createTicket.reset(); // don't show a stale error next time the modal opens
+    onClose();
   };
 
   return (
@@ -46,7 +47,7 @@ export function CreateTicketModal({ isOpen, onClose }) {
             <span className="font-semibold text-sm">Create Support Ticket</span>
           </div>
           <button
-            onClick={onClose}
+            onClick={handleClose}
             className="p-1 rounded text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
           >
             <X className="w-4 h-4" />
@@ -117,7 +118,7 @@ export function CreateTicketModal({ isOpen, onClose }) {
           <div className="pt-2 flex justify-end gap-2">
             <button
               type="button"
-              onClick={onClose}
+              onClick={handleClose}
               className="px-3 py-1.5 rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-300 hover:bg-zinc-800 font-medium"
             >
               Cancel

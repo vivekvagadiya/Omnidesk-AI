@@ -1,13 +1,19 @@
 export {
   apiClient,
   apiClient as api, // Alias for backwards compatibility
+  API_BASE_URL,
+  SESSION_EXPIRED_EVENT,
+  refreshSession,
+  authenticatedFetch,
+} from './apiClient';
+export { ApiError, toApiError } from './apiError';
+export {
   getStoredAccessToken,
   getStoredRefreshToken,
   getStoredUser,
   setStoredSession,
   clearStoredSession,
-  authenticatedFetch,
-} from './apiClient';
+} from './tokenStorage';
 
 export { authService } from './auth.service';
 export { copilotService } from './copilot.service';

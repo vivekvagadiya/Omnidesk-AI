@@ -8,8 +8,8 @@ export const ticketService = {
   /**
    * List tickets with optional filters and pagination
    */
-  async getTickets(params = {}) {
-    const response = await apiClient.get('/tickets', { params });
+  async getTickets(params = {}, { signal } = {}) {
+    const response = await apiClient.get('/tickets', { params, signal });
     return response.data.data;
   },
 

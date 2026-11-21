@@ -40,8 +40,8 @@ export const authService = {
   /**
    * Fetch current authenticated user profile
    */
-  async getMe() {
-    const response = await apiClient.get('/auth/me');
-    return response.data.data;
+  async getMe({ signal } = {}) {
+    const response = await apiClient.get('/auth/me', { signal });
+    return response.data.data?.user ?? null;
   },
 };

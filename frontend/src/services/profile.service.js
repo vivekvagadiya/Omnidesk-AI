@@ -8,8 +8,8 @@ export const profileService = {
   /**
    * Fetch current user leave quotas and balance
    */
-  async getLeaveBalance() {
-    const response = await apiClient.get('/profile/balance');
+  async getLeaveBalance({ signal } = {}) {
+    const response = await apiClient.get('/profile/balance', { signal });
     return response.data.data;
   },
 };

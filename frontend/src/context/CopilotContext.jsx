@@ -1,7 +1,19 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useCallback } from 'react';
 import { toast } from 'sonner';
-import { copilotService, ticketService, profileService } from '../services';
+import { copilotService } from '../services';
 import { useAuth } from './AuthContext';
+import {
+  useApproveActionMutation,
+  useRejectActionMutation,
+  useInvalidateForTools,
+} from '../queries/copilot.queries';
+
+/**
+ * Chat session state (messages, streaming, citations, HITL cards).
+ * Server data (leave balance, tickets) lives in TanStack Query — see src/queries.
+ * Mounted per signed-in user (keyed by userId in App), so switching accounts
+ * always starts a fresh conversation.
+ */
 
 const CopilotContext = createContext(null);
 
@@ -26,49 +38,12 @@ export function CopilotProvider({ children }) {
   const [selectedCitation, setSelectedCitation] = useState(null);
   const [isCitationDrawerOpen, setIsCitationDrawerOpen] = useState(false);
 
-  // Operations state
-  const [leaveBalance, setLeaveBalance] = useState({ casual: 12, sick: 7, maternity: 90 });
-  const [tickets, setTickets] = useState([]);
-  const [ticketScope, setTicketScope] = useState('mine'); // 'mine' | 'all'
-  const [isLoadingOps, setIsLoadingOps] = useState(false);
   const [notificationsCount, setNotificationsCount] = useState(2);
+  const incrementNotifications = useCallback(() => setNotificationsCount((c) => c + 1), []);
 
-  // Fetch live leave balance
-  const fetchLeaveBalance = useCallback(async () => {
-    if (!user) return;
-    try {
-      const data = await profileService.getLeaveBalance();
-      if (data?.leaveBalances) {
-        setLeaveBalance(data.leaveBalances);
-      }
-    } catch (err) {
-      console.warn('Could not fetch leave balance:', err.message);
-    }
-  }, [user]);
-
-  // Fetch tickets
-  const fetchTickets = useCallback(
-    async (scope = ticketScope) => {
-      if (!user) return;
-      try {
-        const isManagerOrAdmin = ['manager', 'org_admin', 'super_admin', 'hr_admin', 'it_admin'].includes(
-          user?.role
-        );
-        const params = { limit: 25 };
-        if (!isManagerOrAdmin || scope !== 'all') {
-          params.userId = user.userId;
-        }
-
-        const data = await ticketService.getTickets(params);
-        if (data?.tickets) {
-          setTickets(data.tickets);
-        }
-      } catch (err) {
-        console.warn('Could not fetch tickets:', err.message);
-      }
-    },
-    [user, ticketScope]
-  );
+  const { mutateAsync: approveAsync } = useApproveActionMutation();
+  const { mutateAsync: rejectAsync } = useRejectActionMutation();
+  const invalidateForTools = useInvalidateForTools();
 
   // Clear chat session and start fresh
   const clearChat = () => {
@@ -86,14 +61,6 @@ export function CopilotProvider({ children }) {
     setActiveToolPill(null);
     toast.info('Chat session reset', { description: 'New conversational session initiated.' });
   };
-
-  // Initial data load when user logs in
-  useEffect(() => {
-    if (user) {
-      setIsLoadingOps(true);
-      Promise.all([fetchLeaveBalance(), fetchTickets()]).finally(() => setIsLoadingOps(false));
-    }
-  }, [user, fetchLeaveBalance, fetchTickets]);
 
   // Open Citation Drawer
   const openCitation = (citationOrBadge) => {
@@ -144,6 +111,9 @@ export function CopilotProvider({ children }) {
     setIsStreaming(true);
     setActiveToolPill(null);
 
+    // Tools executed during this turn decide which side panels to refresh afterwards
+    const toolsUsed = new Set();
+
     try {
       await copilotService.streamChat({
         message: text,
@@ -152,6 +122,7 @@ export function CopilotProvider({ children }) {
           console.log(`[Copilot SSE] Event: ${event}`, payload);
 
           if (event === 'tool_call') {
+            if (payload.tool) toolsUsed.add(payload.tool);
             setActiveToolPill({
               tool: payload.tool,
               status: payload.status,
@@ -245,95 +216,48 @@ export function CopilotProvider({ children }) {
     } finally {
       setIsStreaming(false);
       setActiveToolPill(null);
+      // e.g. "create a ticket for my broken laptop" runs createTicket directly from chat
+      invalidateForTools([...toolsUsed]);
     }
   };
 
-  // HITL Action Approval
+  // HITL Action Approval (balance/ticket queries are invalidated by the mutation;
+  // failures toast via the mutation's meta.errorTitle)
   const approveAction = async (actionId) => {
-    try {
-      const res = await copilotService.approveAction(actionId);
+    const res = await approveAsync(actionId);
 
-      // Update message card state
-      setMessages((prev) =>
-        prev.map((msg) => {
-          if (msg.stagedAction?.actionId === actionId) {
-            return {
-              ...msg,
-              stagedAction: {
-                ...msg.stagedAction,
-                status: 'APPROVED',
-                result: res.data,
-              },
-            };
-          }
-          return msg;
-        })
-      );
+    setMessages((prev) =>
+      prev.map((msg) =>
+        msg.stagedAction?.actionId === actionId
+          ? { ...msg, stagedAction: { ...msg.stagedAction, status: 'APPROVED', result: res.data } }
+          : msg
+      )
+    );
+    incrementNotifications();
 
-      // Silently refresh profile balance and tickets live
-      await Promise.all([fetchLeaveBalance(), fetchTickets()]);
-      setNotificationsCount((c) => c + 1);
-
-      toast.success('Action Approved & Executed', {
-        description: res.data?.message || 'Database mutation committed and notification queued.',
-      });
-
-      return res;
-    } catch (err) {
-      const msg = err.response?.data?.message || err.message;
-      toast.error('Approval Failed', { description: msg });
-      throw err;
-    }
-  };
-
-  // HITL Action Rejection
-  const rejectAction = async (actionId) => {
-    try {
-      const res = await copilotService.rejectAction(actionId);
-
-      setMessages((prev) =>
-        prev.map((msg) => {
-          if (msg.stagedAction?.actionId === actionId) {
-            return {
-              ...msg,
-              stagedAction: {
-                ...msg.stagedAction,
-                status: 'REJECTED',
-              },
-            };
-          }
-          return msg;
-        })
-      );
-
-      toast.info('Action Rejected', {
-        description: 'The staged consequential action was safely cancelled.',
-      });
-
-      return res;
-    } catch (err) {
-      const msg = err.response?.data?.message || err.message;
-      toast.error('Rejection Failed', { description: msg });
-      throw err;
-    }
-  };
-
-  // Direct Ticket Creation
-  const createNewTicket = async ({ title, description, category, priority }) => {
-    const res = await ticketService.createTicket({ title, description, category, priority });
-    await fetchTickets();
-    setNotificationsCount((c) => c + 1);
-
-    toast.success('Support Ticket Created', {
-      description: `Ticket ${res?.ticketId || ''} created under ${category}.`,
+    toast.success('Action Approved & Executed', {
+      description: res.data?.message || 'Database mutation committed and notification queued.',
     });
 
     return res;
   };
 
-  // Policy Document Upload
-  const uploadPolicyDocument = async (file, department) => {
-    const res = await copilotService.uploadDocument(file, department || user?.department || 'GENERAL');
+  // HITL Action Rejection
+  const rejectAction = async (actionId) => {
+    const res = await rejectAsync(actionId);
+
+    setMessages((prev) =>
+      prev.map((msg) =>
+        msg.stagedAction?.actionId === actionId
+          ? { ...msg, stagedAction: { ...msg.stagedAction, status: 'REJECTED' } }
+          : msg
+      )
+    );
+
+    toast.info('Action Rejected', {
+      description: 'The staged consequential action was safely cancelled.',
+    });
+
     return res;
   };
 
@@ -353,21 +277,11 @@ export function CopilotProvider({ children }) {
         isCitationDrawerOpen,
         openCitation,
         closeCitationDrawer,
-        // Ops & Actions
-        leaveBalance,
-        tickets,
-        ticketScope,
-        setTicketScope: (newScope) => {
-          setTicketScope(newScope);
-          fetchTickets(newScope);
-        },
-        isLoadingOps,
+        // Actions & notifications
         notificationsCount,
+        incrementNotifications,
         approveAction,
         rejectAction,
-        createNewTicket,
-        uploadPolicyDocument,
-        refetchOps: () => Promise.all([fetchLeaveBalance(), fetchTickets()]),
       }}
     >
       {children}

@@ -1,4 +1,4 @@
-import { apiClient, authenticatedFetch } from './apiClient';
+import { apiClient, authenticatedFetch, UPLOAD_TIMEOUT_MS } from './apiClient';
 
 /**
  * Copilot Service
@@ -15,16 +15,12 @@ export const copilotService = {
    * @param {AbortSignal} [params.signal] AbortController signal
    */
   async streamChat({ message, sessionId, onEvent, signal }) {
+    // Rejects with ApiError on failure; refreshes an expired token once before giving up
     const response = await authenticatedFetch('/copilot/chat', {
       method: 'POST',
       body: JSON.stringify({ message, sessionId }),
       signal,
     });
-
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.message || `Server error (${response.status})`);
-    }
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder('utf-8');
@@ -106,10 +102,9 @@ export const copilotService = {
       );
     }
 
+    // No manual Content-Type: the browser must set multipart/form-data WITH its boundary
     const response = await apiClient.post('/copilot/documents', formData, {
-      headers: {
-        'Content-Type': 'multipart/form-data',
-      },
+      timeout: UPLOAD_TIMEOUT_MS,
     });
 
     return response.data;

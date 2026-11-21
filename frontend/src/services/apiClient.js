@@ -1,171 +1,171 @@
 import axios from 'axios';
+import { ApiError, toApiError, apiErrorFromResponse } from './apiError';
+import {
+  getStoredAccessToken,
+  getStoredRefreshToken,
+  setStoredSession,
+  clearStoredSession,
+} from './tokenStorage';
 
-// Storage keys
-export const ACCESS_TOKEN_KEY = 'omnidesk_access_token';
-export const REFRESH_TOKEN_KEY = 'omnidesk_refresh_token';
-export const USER_KEY = 'omnidesk_user';
-
-export const API_BASE_URL = '/api';
+// Re-exported so existing imports from './apiClient' keep working
+export {
+  ACCESS_TOKEN_KEY,
+  REFRESH_TOKEN_KEY,
+  USER_KEY,
+  getStoredAccessToken,
+  getStoredRefreshToken,
+  getStoredUser,
+  setStoredSession,
+  clearStoredSession,
+} from './tokenStorage';
+export { ApiError } from './apiError';
 
 /**
- * Singleton Axios HTTP Client
- * Configured with baseURL and standard headers
+ * API base URL. Defaults to '/api' (proxied to the backend by Vite in dev).
+ * Set VITE_API_BASE_URL in frontend/.env when the API lives on another origin.
+ */
+export const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '/api').replace(/\/$/, '');
+
+export const DEFAULT_TIMEOUT_MS = 30_000;
+export const UPLOAD_TIMEOUT_MS = 120_000;
+
+export const SESSION_EXPIRED_EVENT = 'omnidesk:session_expired';
+
+/**
+ * Singleton axios client. Every call resolves with the axios response or rejects
+ * with an ApiError (never a raw AxiosError).
  */
 export const apiClient = axios.create({
   baseURL: API_BASE_URL,
+  timeout: DEFAULT_TIMEOUT_MS,
   headers: {
-    'Content-Type': 'application/json',
+    Accept: 'application/json',
   },
 });
 
-export function getStoredAccessToken() {
-  return localStorage.getItem(ACCESS_TOKEN_KEY) || sessionStorage.getItem(ACCESS_TOKEN_KEY);
+// Auth endpoints that must never trigger a refresh-and-retry loop
+const NO_REFRESH_PATHS = ['/auth/login', '/auth/register', '/auth/refresh'];
+const isNoRefreshPath = (url = '') => NO_REFRESH_PATHS.some((p) => url.includes(p));
+
+// -------------------------------------------------------------
+// Token refresh — single flight shared by axios AND fetch (SSE)
+// -------------------------------------------------------------
+let refreshPromise = null;
+
+function expireSession() {
+  clearStoredSession();
+  window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT));
 }
 
-export function getStoredRefreshToken() {
-  return localStorage.getItem(REFRESH_TOKEN_KEY) || sessionStorage.getItem(REFRESH_TOKEN_KEY);
-}
+/**
+ * Rotate the refresh token. Concurrent callers share one network request,
+ * so ten requests failing with 401 at once cause exactly one /auth/refresh.
+ *
+ * @returns {Promise<string>} New access token
+ */
+export function refreshSession() {
+  if (refreshPromise) return refreshPromise;
 
-export function getStoredUser() {
-  try {
-    const raw = localStorage.getItem(USER_KEY) || sessionStorage.getItem(USER_KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch {
-    return null;
+  const refreshToken = getStoredRefreshToken();
+  if (!refreshToken) {
+    expireSession();
+    return Promise.reject(new ApiError('Your session has expired. Please sign in again.', { status: 401 }));
   }
+
+  refreshPromise = axios
+    .post(`${API_BASE_URL}/auth/refresh`, { refreshToken }, { timeout: DEFAULT_TIMEOUT_MS })
+    .then(({ data }) => {
+      const { accessToken, refreshToken: rotated } = data.data;
+      setStoredSession({ accessToken, refreshToken: rotated });
+      return accessToken;
+    })
+    .catch((err) => {
+      const apiError = toApiError(err);
+      // Only a rejected refresh token ends the session; a network blip should not log the user out
+      if (apiError.status === 401 || apiError.status === 403 || apiError.status === 400) {
+        expireSession();
+      }
+      throw apiError;
+    })
+    .finally(() => {
+      refreshPromise = null;
+    });
+
+  return refreshPromise;
 }
 
-export function setStoredSession({ accessToken, refreshToken, user, rememberMe = true }) {
-  const storage = rememberMe ? localStorage : sessionStorage;
-  if (accessToken) storage.setItem(ACCESS_TOKEN_KEY, accessToken);
-  if (refreshToken) storage.setItem(REFRESH_TOKEN_KEY, refreshToken);
-  if (user) storage.setItem(USER_KEY, JSON.stringify(user));
-}
-
-export function clearStoredSession() {
-  localStorage.removeItem(ACCESS_TOKEN_KEY);
-  localStorage.removeItem(REFRESH_TOKEN_KEY);
-  localStorage.removeItem(USER_KEY);
-  sessionStorage.removeItem(ACCESS_TOKEN_KEY);
-  sessionStorage.removeItem(REFRESH_TOKEN_KEY);
-  sessionStorage.removeItem(USER_KEY);
-}
+// -------------------------------------------------------------
+// Request interceptor: attach the current access token
+// -------------------------------------------------------------
+apiClient.interceptors.request.use((config) => {
+  const token = getStoredAccessToken();
+  if (token && !config.headers.Authorization) {
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
+});
 
 // -------------------------------------------------------------
-// Request Interceptor: Attach JWT Bearer Token
+// Response interceptor: refresh once on 401, normalize every error
 // -------------------------------------------------------------
-apiClient.interceptors.request.use(
-  (config) => {
-    const token = getStoredAccessToken();
-    if (token && !config.headers.Authorization) {
-      config.headers.Authorization = `Bearer ${token}`;
-    }
-    return config;
-  },
-  (error) => Promise.reject(error)
-);
-
-// -------------------------------------------------------------
-// Response Interceptor: Automatic Refresh Token Rotation on 401
-// -------------------------------------------------------------
-let isRefreshing = false;
-let failedQueue = [];
-
-const processQueue = (error, token = null) => {
-  failedQueue.forEach((prom) => {
-    if (error) {
-      prom.reject(error);
-    } else {
-      prom.resolve(token);
-    }
-  });
-  failedQueue = [];
-};
-
 apiClient.interceptors.response.use(
   (response) => response,
   async (error) => {
     const originalRequest = error.config;
 
-    if (error.response?.status === 401 && !originalRequest._retry) {
-      const refreshToken = getStoredRefreshToken();
-
-      // Don't retry if the request was itself login or refresh
-      if (
-        originalRequest.url?.includes('/auth/login') ||
-        originalRequest.url?.includes('/auth/refresh')
-      ) {
-        return Promise.reject(error);
-      }
-
-      if (!refreshToken) {
-        clearStoredSession();
-        window.dispatchEvent(new Event('omnidesk:session_expired'));
-        return Promise.reject(error);
-      }
-
-      if (isRefreshing) {
-        return new Promise((resolve, reject) => {
-          failedQueue.push({ resolve, reject });
-        })
-          .then((token) => {
-            originalRequest.headers.Authorization = `Bearer ${token}`;
-            return apiClient(originalRequest);
-          })
-          .catch((err) => Promise.reject(err));
-      }
-
+    if (
+      error.response?.status === 401 &&
+      originalRequest &&
+      !originalRequest._retry &&
+      !isNoRefreshPath(originalRequest.url)
+    ) {
       originalRequest._retry = true;
-      isRefreshing = true;
-
       try {
-        const { data } = await axios.post(`${API_BASE_URL}/auth/refresh`, { refreshToken });
-        const newAccessToken = data.data.accessToken;
-        const newRefreshToken = data.data.refreshToken;
-
-        setStoredSession({
-          accessToken: newAccessToken,
-          refreshToken: newRefreshToken,
-        });
-
-        apiClient.defaults.headers.common.Authorization = `Bearer ${newAccessToken}`;
-        processQueue(null, newAccessToken);
-
-        originalRequest.headers.Authorization = `Bearer ${newAccessToken}`;
+        const newToken = await refreshSession();
+        originalRequest.headers.Authorization = `Bearer ${newToken}`;
         return apiClient(originalRequest);
-      } catch (refreshErr) {
-        processQueue(refreshErr, null);
-        clearStoredSession();
-        window.dispatchEvent(new Event('omnidesk:session_expired'));
-        return Promise.reject(refreshErr);
-      } finally {
-        isRefreshing = false;
+      } catch (refreshError) {
+        return Promise.reject(toApiError(refreshError));
       }
     }
 
-    return Promise.reject(error);
+    return Promise.reject(toApiError(error));
   }
 );
 
 /**
- * Authenticated Fetch Wrapper
- * Uses the same baseURL and Bearer authorization token as the Axios interceptor
+ * fetch() with the same base URL, auth header and refresh-on-401 behaviour as apiClient.
+ * Used for streaming responses (SSE), which axios cannot consume incrementally.
+ * Resolves with the Response when ok, otherwise rejects with an ApiError.
  */
 export async function authenticatedFetch(endpoint, options = {}) {
-  const url = endpoint.startsWith('http') ? endpoint : `${API_BASE_URL}${endpoint.startsWith('/') ? '' : '/'}${endpoint}`;
-  const token = getStoredAccessToken();
+  const url = endpoint.startsWith('http')
+    ? endpoint
+    : `${API_BASE_URL}${endpoint.startsWith('/') ? '' : '/'}${endpoint}`;
 
-  const headers = {
-    'Content-Type': 'application/json',
-    ...(options.headers || {}),
-  };
+  const send = (token) =>
+    fetch(url, {
+      ...options,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(options.headers || {}),
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+    });
 
-  if (token) {
-    headers.Authorization = `Bearer ${token}`;
+  let response;
+  try {
+    response = await send(getStoredAccessToken());
+    if (response.status === 401) {
+      const newToken = await refreshSession();
+      response = await send(newToken);
+    }
+  } catch (err) {
+    throw toApiError(err);
   }
 
-  return fetch(url, {
-    ...options,
-    headers,
-  });
+  if (!response.ok) {
+    throw await apiErrorFromResponse(response);
+  }
+  return response;
 }
