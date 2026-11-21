@@ -1,6 +1,23 @@
 import { getRedisClient } from '../config/redis.js';
 import { errorResponse } from '../utils/apiResponse.js';
 
+/**
+ * Atomic fixed-window counter: INCR + expiry in ONE server-side step.
+ * Doing INCR then EXPIRE as two commands could leave a key with no TTL if the
+ * connection dropped in between, locking that IP out permanently. The PTTL < 0
+ * branch also repairs any key that was left without an expiry.
+ * Returns { count, ttlMs }.
+ */
+const RATE_LIMIT_SCRIPT = `
+local count = redis.call('INCR', KEYS[1])
+local ttl = redis.call('PTTL', KEYS[1])
+if ttl < 0 then
+  redis.call('PEXPIRE', KEYS[1], ARGV[1])
+  ttl = tonumber(ARGV[1])
+end
+return { count, ttl }
+`;
+
 // In-memory fallback map: key -> { count, resetTime }
 const memoryStore = new Map();
 
@@ -38,12 +55,10 @@ export function createRateLimiter({
   const windowSec = Math.ceil(windowMs / 1000);
 
   return async (req, res, next) => {
-    // Resolve client IP (support proxies / Docker networks)
-    const ip =
-      req.headers['x-forwarded-for']?.split(',')[0].trim() ||
-      req.socket?.remoteAddress ||
-      req.ip ||
-      '127.0.0.1';
+    // req.ip honours app.set('trust proxy', TRUST_PROXY): X-Forwarded-For is only
+    // believed when it was added by a proxy we trust. Reading the header directly let
+    // any client pick a fresh "IP" per request and skip the limit entirely.
+    const ip = req.ip || req.socket?.remoteAddress || 'unknown';
 
     const key = `ratelimit:${prefix}:${ip}`;
     const client = getRedisClient();
@@ -51,15 +66,13 @@ export function createRateLimiter({
     // 1. Primary path: Redis
     if (client && client.isOpen) {
       try {
-        const current = await client.incr(key);
-        if (current === 1) {
-          await client.expire(key, windowSec);
-        }
-
-        const ttl = await client.ttl(key);
+        const [current, ttlMs] = await client.eval(RATE_LIMIT_SCRIPT, {
+          keys: [key],
+          arguments: [String(windowSec * 1000)],
+        });
         res.setHeader('X-RateLimit-Limit', max);
         res.setHeader('X-RateLimit-Remaining', Math.max(0, max - current));
-        res.setHeader('X-RateLimit-Reset', Date.now() + (ttl > 0 ? ttl * 1000 : windowMs));
+        res.setHeader('X-RateLimit-Reset', Date.now() + (ttlMs > 0 ? ttlMs : windowMs));
 
         if (current > max) {
           return errorResponse(res, {

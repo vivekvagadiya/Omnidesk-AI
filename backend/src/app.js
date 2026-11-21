@@ -9,6 +9,9 @@ import { errorHandler } from './middlewares/errorHandler.js';
 
 const app = express();
 
+// Only trust X-Forwarded-For from known proxies, otherwise clients can spoof their IP
+app.set('trust proxy', config.trustProxy);
+
 // Essential security headers
 app.use(helmet());
 

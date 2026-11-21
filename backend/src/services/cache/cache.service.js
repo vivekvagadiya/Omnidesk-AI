@@ -1,4 +1,4 @@
-import { getRedisClient, isRedisReady } from '../../config/redis.js';
+import { getCacheClient, isRedisReady } from '../../config/redis.js';
 
 /**
  * Cache Service — Redis cache-aside primitives with versioned tag invalidation.
@@ -22,7 +22,22 @@ export const CACHE_TTL = {
 };
 
 const TAG_VERSION_PREFIX = 'cache:tagv:';
-const TAG_VERSION_TTL_SECONDS = 7 * 24 * 3600; // far longer than any entry TTL
+const TAG_VERSION_TTL_SECONDS = 7 * 24 * 3600;
+// Entries must expire long before tag versions do, otherwise an expired version
+// resetting to 0 could resurrect an old entry stored under v0.
+export const MAX_ENTRY_TTL_SECONDS = 24 * 3600;
+// Largest response worth caching; bigger payloads are served uncached
+export const MAX_ENTRY_BYTES = 512 * 1024;
+
+/**
+ * Clamp a TTL to the allowed range and add ±10% jitter, so entries written
+ * together don't all expire in the same second (synchronized cache misses).
+ */
+export function effectiveTtl(ttlSeconds) {
+  const base = Math.min(Math.max(1, Math.floor(Number(ttlSeconds) || 300)), MAX_ENTRY_TTL_SECONDS);
+  const jitter = Math.floor(base * 0.1 * (Math.random() * 2 - 1));
+  return Math.max(1, base + jitter);
+}
 
 // Lightweight counters exposed on /api/health
 export const cacheStats = { hits: 0, misses: 0, skips: 0, errors: 0, invalidations: 0 };
@@ -35,7 +50,7 @@ function warn(op, key, err) {
 /**
  * Read a JSON value. Returns null on miss, Redis down, or error.
  */
-export async function getCache(key, client = getRedisClient()) {
+export async function getCache(key, client = getCacheClient()) {
   if (!key || !isRedisReady(client)) return null;
   try {
     const raw = await client.get(key);
@@ -49,10 +64,12 @@ export async function getCache(key, client = getRedisClient()) {
 /**
  * Write a JSON value with TTL (seconds). Returns false when skipped or failed.
  */
-export async function setCache(key, data, ttlSeconds = 300, client = getRedisClient()) {
+export async function setCache(key, data, ttlSeconds = 300, client = getCacheClient()) {
   if (!key || data === undefined || !isRedisReady(client)) return false;
   try {
-    await client.set(key, JSON.stringify(data), { EX: ttlSeconds });
+    const serialized = JSON.stringify(data);
+    if (Buffer.byteLength(serialized) > MAX_ENTRY_BYTES) return false;
+    await client.set(key, serialized, { EX: effectiveTtl(ttlSeconds) });
     return true;
   } catch (err) {
     warn('Write', key, err);
@@ -63,7 +80,7 @@ export async function setCache(key, data, ttlSeconds = 300, client = getRedisCli
 /**
  * Delete a single key.
  */
-export async function invalidateCacheKey(key, client = getRedisClient()) {
+export async function invalidateCacheKey(key, client = getCacheClient()) {
   if (!key || !isRedisReady(client)) return false;
   try {
     await client.del(key);
@@ -78,7 +95,7 @@ export async function invalidateCacheKey(key, client = getRedisClient()) {
  * Delete keys by glob pattern using SCAN (non-blocking, unlike KEYS).
  * For maintenance/scripts only — request paths should use tag invalidation.
  */
-export async function invalidateCachePattern(pattern, client = getRedisClient()) {
+export async function invalidateCachePattern(pattern, client = getCacheClient()) {
   if (!pattern || !isRedisReady(client)) return false;
   try {
     let batch = [];
@@ -105,7 +122,7 @@ export async function invalidateCachePattern(pattern, client = getRedisClient())
  * Current version for each tag (0 when never bumped).
  * @returns {Promise<number[]|null>} null when Redis is unavailable
  */
-export async function getTagVersions(tags, client = getRedisClient()) {
+export async function getTagVersions(tags, client = getCacheClient()) {
   if (!tags?.length) return [];
   if (!isRedisReady(client)) return null;
   try {
@@ -120,7 +137,7 @@ export async function getTagVersions(tags, client = getRedisClient()) {
 /**
  * Bump tag versions: every cached entry depending on these tags becomes unreachable.
  */
-export async function invalidateTags(tags, client = getRedisClient()) {
+export async function invalidateTags(tags, client = getCacheClient()) {
   const list = [...new Set((tags || []).filter(Boolean))];
   if (!list.length || !isRedisReady(client)) return false;
   try {

@@ -34,7 +34,14 @@ function ticketListTags(req) {
  */
 router.get(
   '/',
-  cacheResponse({ ttl: CACHE_TTL.TICKETS, tag: 'tickets', scope: 'user', tags: ticketListTags }),
+  cacheResponse({
+    ttl: CACHE_TTL.TICKETS,
+    tag: 'tickets',
+    scope: 'user',
+    // Must match the params getTickets reads; anything else is served uncached
+    query: ['status', 'category', 'priority', 'page', 'limit', 'userId'],
+    tags: ticketListTags,
+  }),
   getTickets
 );
 
