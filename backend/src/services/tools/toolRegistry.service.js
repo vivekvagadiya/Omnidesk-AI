@@ -8,6 +8,7 @@ import {
   ACTION_TYPES,
 } from './hitlGatekeeper.service.js';
 import { invalidateTicketCaches } from '../cache/cache.service.js';
+import { notify } from '../notifications/notification.service.js';
 
 export const SAFE_TOOLS = ['searchPolicies', 'getLeaveBalance', 'getMyTickets'];
 export const MUTATION_TOOLS = ['createTicket'];
@@ -223,6 +224,12 @@ export async function createTicket(args = {}, context = {}) {
 
   // Refresh this user's ticket lists and the org-wide admin view
   await invalidateTicketCaches({ orgId: user.orgId, userId: user.userId });
+
+  await notify('TICKET_CREATED', {
+    orgId: user.orgId,
+    actor: { userId: user.userId, name: user.name },
+    ticket: { ticketId: ticket.ticketId, title: ticket.title, category: ticket.category, priority: ticket.priority },
+  });
 
   return {
     tool: 'createTicket',

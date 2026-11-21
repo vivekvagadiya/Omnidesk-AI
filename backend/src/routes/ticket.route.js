@@ -12,7 +12,8 @@ router.use(authenticateJwt);
 /**
  * Which cached data does this ticket list depend on?
  * Mirrors the visibility rules in getTickets:
- *  - employees/managers: always their own tickets
+ *  - employees: always their own tickets
+ *  - managers without a filter: themselves + direct reports
  *  - admins with ?userId=X: X's tickets
  *  - admins without a filter: the whole org
  */
@@ -21,9 +22,12 @@ function ticketListTags(req) {
   const isAdmin = ADMIN_ROLES.includes(role);
   const filterUserId = typeof req.query.userId === 'string' ? req.query.userId.trim() : '';
 
-  if (!isAdmin) return [cacheTags.user('tickets', orgId, userId)];
-  if (filterUserId) return [cacheTags.user('tickets', orgId, filterUserId)];
-  return [cacheTags.org('tickets', orgId)];
+  if (isAdmin || role === 'manager') {
+    if (filterUserId) return [cacheTags.user('tickets', orgId, filterUserId)];
+    // Admin org view / manager team view: refreshed by any ticket change in the org
+    return [cacheTags.org('tickets', orgId)];
+  }
+  return [cacheTags.user('tickets', orgId, userId)];
 }
 
 /**

@@ -1,8 +1,10 @@
 import crypto from 'node:crypto';
 import { Ticket, TICKET_CATEGORIES, TICKET_PRIORITIES } from '../models/Ticket.model.js';
+import { User } from '../models/User.model.js';
 import { successResponse, errorResponse } from '../utils/apiResponse.js';
 import { invalidateTicketCaches } from '../services/cache/cache.service.js';
 import { enqueueNotification } from '../services/queue/notificationWorker.js';
+import { notify } from '../services/notifications/notification.service.js';
 
 // Exported so the route-level cache resolves tags with the same visibility rules
 export const ADMIN_ROLES = ['super_admin', 'org_admin', 'hr_admin', 'it_admin'];
@@ -29,12 +31,29 @@ export async function getTickets(req, res) {
   };
 
   const isAdmin = ADMIN_ROLES.includes(user.role);
+  const requestedUserId = typeof filterUserId === 'string' ? filterUserId.trim() : '';
 
-  // Non-admin users can ONLY view their own tickets
-  if (!isAdmin) {
+  if (isAdmin) {
+    // Admins: whole org, or one user when filtered
+    if (requestedUserId) query.userId = requestedUserId;
+  } else if (user.role === 'manager') {
+    // Managers: themselves + direct reports ("Team Requests"), never anyone else
+    const reports = await User.find({ orgId: user.orgId, managerId: user.userId }).select('userId').lean();
+    const team = [user.userId, ...reports.map((r) => r.userId)];
+
+    if (!requestedUserId) {
+      query.userId = { $in: team };
+    } else if (team.includes(requestedUserId)) {
+      query.userId = requestedUserId;
+    } else {
+      return errorResponse(res, {
+        statusCode: 403,
+        message: 'Managers can only view tickets of their direct reports.',
+      });
+    }
+  } else {
+    // Employees can ONLY view their own tickets
     query.userId = user.userId;
-  } else if (filterUserId && typeof filterUserId === 'string') {
-    query.userId = filterUserId.trim();
   }
 
   if (status) query.status = status.toUpperCase();
@@ -141,6 +160,13 @@ export async function createTicket(req, res) {
 
     // Refresh this user's ticket lists and the org-wide admin view
     await invalidateTicketCaches({ orgId: user.orgId, userId: user.userId });
+
+    // In-app notifications: creator + the admins who watch this category
+    await notify('TICKET_CREATED', {
+      orgId: user.orgId,
+      actor: { userId: user.userId, name: user.name },
+      ticket: { ticketId, title: title.trim(), category: normalizedCategory, priority: normalizedPriority },
+    });
 
     await enqueueNotification({
       event: 'TICKET_CREATED',

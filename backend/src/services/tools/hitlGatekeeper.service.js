@@ -3,6 +3,7 @@ import { getRedisClient } from '../../config/redis.js';
 import { User } from '../../models/User.model.js';
 import { Ticket } from '../../models/Ticket.model.js';
 import { invalidateTicketCaches, invalidateBalanceCaches } from '../cache/cache.service.js';
+import { notify } from '../notifications/notification.service.js';
 import { Asset } from '../../models/Asset.model.js';
 
 export const ACTION_TOKEN_TTL_SECONDS = 900; // 15 minutes TTL
@@ -437,6 +438,20 @@ export async function consumeActionToken({
     // Refresh the employee's balance and ticket caches (not the whole org)
     await invalidateBalanceCaches({ orgId: staged.orgId, userId: targetUserId });
     await invalidateTicketCaches({ orgId: staged.orgId, userId: targetUserId });
+
+    // Employee + their manager
+    await notify('LEAVE_APPROVED', {
+      orgId: staged.orgId,
+      actor: { userId: user.userId, name: user.name },
+      employeeId: targetUserId,
+      employeeName: updatedUser.name,
+      leaveType,
+      days,
+      startDate,
+      endDate: endDate || startDate,
+      ticketId: leaveTicket.ticketId,
+      remaining: updatedUser.leaveBalances[leaveType],
+    });
   } else if (staged.type === ACTION_TYPES.REQUEST_HARDWARE_UPGRADE) {
     const { assetType, preferredModel, reason, urgency } = staged.payload;
 
@@ -466,6 +481,14 @@ export async function consumeActionToken({
 
     // Refresh the requester's ticket caches
     await invalidateTicketCaches({ orgId: staged.orgId, userId: staged.userId });
+
+    // Requester + IT admins
+    await notify('HARDWARE_REQUESTED', {
+      orgId: staged.orgId,
+      actor: { userId: staged.userId, name: user.name },
+      ticket: { ticketId: hwTicket.ticketId, title: hwTicket.title, priority: hwTicket.priority },
+      preferredModel,
+    });
 
     executionResult = {
       type: ACTION_TYPES.REQUEST_HARDWARE_UPGRADE,

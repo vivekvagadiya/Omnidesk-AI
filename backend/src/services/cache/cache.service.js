@@ -194,3 +194,11 @@ export function invalidateResourceForOrg(orgId, resource) {
   if (!orgId || !resource) return Promise.resolve(false);
   return invalidateTags([cacheTags.orgFlush(resource, orgId)]);
 }
+
+/**
+ * New or read notifications for these users: refresh their unread counts.
+ */
+export function invalidateNotificationCaches({ orgId, userIds = [] }) {
+  if (!orgId || !userIds.length) return Promise.resolve(false);
+  return invalidateTags(userIds.map((userId) => cacheTags.user('notifications', orgId, userId)));
+}
