@@ -19,3 +19,4 @@ export { authService } from './auth.service';
 export { copilotService } from './copilot.service';
 export { ticketService } from './ticket.service';
 export { profileService } from './profile.service';
+export { notificationService } from './notification.service';

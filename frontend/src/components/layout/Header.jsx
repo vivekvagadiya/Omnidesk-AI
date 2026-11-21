@@ -1,11 +1,12 @@
 import React from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useCopilot } from '../../context/CopilotContext';
-import { Bell, Sparkles, LogOut, Shield, ChevronRight } from 'lucide-react';
+import { LogOut, ChevronRight } from 'lucide-react';
+import { NotificationBell } from './NotificationBell';
 
 export function Header() {
   const { user, logout } = useAuth();
-  const { notificationsCount, sessionId } = useCopilot();
+  const { sessionId } = useCopilot();
 
   const getRoleBadge = (role) => {
     switch (role) {
@@ -55,18 +56,7 @@ export function Header() {
 
       {/* Right Controls: Notification Bell, User Card & Logout */}
       <div className="flex items-center gap-3">
-        {/* Notification Bell with Badge */}
-        <button
-          title="Notifications"
-          className="relative p-1.5 rounded-lg text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50 transition-colors border border-transparent hover:border-zinc-800"
-        >
-          <Bell className="w-4 h-4" />
-          {notificationsCount > 0 && (
-            <span className="absolute -top-0.5 -right-0.5 w-4 h-4 rounded-full bg-zinc-100 text-zinc-950 font-mono text-[10px] font-bold flex items-center justify-center border border-zinc-900">
-              {notificationsCount}
-            </span>
-          )}
-        </button>
+        <NotificationBell />
 
         {/* User Identity Chip */}
         <div className="flex items-center gap-2 pl-2 border-l border-zinc-800">

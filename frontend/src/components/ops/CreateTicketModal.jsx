@@ -1,10 +1,8 @@
 import React, { useState } from 'react';
-import { useCopilot } from '../../context/CopilotContext';
 import { useCreateTicketMutation } from '../../queries';
 import { X, Tag, AlertTriangle } from 'lucide-react';
 
 export function CreateTicketModal({ isOpen, onClose }) {
-  const { incrementNotifications } = useCopilot();
   const createTicket = useCreateTicketMutation();
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
@@ -23,7 +21,6 @@ export function CreateTicketModal({ isOpen, onClose }) {
       { title: title.trim(), description: description.trim(), category, priority },
       {
         onSuccess: () => {
-          incrementNotifications();
           setTitle('');
           setDescription('');
           createTicket.reset();

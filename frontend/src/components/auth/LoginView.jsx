@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { toast } from 'sonner';
-import { useAuth, PRESEEDED_ACCOUNTS } from '../../context/AuthContext';
+import { useAuth, PRESEEDED_ACCOUNTS, DEMO_PASSWORD } from '../../context/AuthContext';
 import {
   ShieldCheck,
   ArrowRight,
@@ -15,14 +15,14 @@ export function LoginView() {
   const [mode, setMode] = useState('login'); // 'login' | 'register'
 
   // Login form state
-  const [loginEmail, setLoginEmail] = useState('sarah.j@abctech.com');
-  const [loginPassword, setLoginPassword] = useState('Password123!');
+  const [loginEmail, setLoginEmail] = useState(PRESEEDED_ACCOUNTS[0].email);
+  const [loginPassword, setLoginPassword] = useState(DEMO_PASSWORD);
 
   // Register form state
   const [regName, setRegName] = useState('');
   const [regEmail, setRegEmail] = useState('');
   const [regPassword, setRegPassword] = useState('');
-  const [regOrgId, setRegOrgId] = useState('abctech');
+  const [regOrgId, setRegOrgId] = useState('org_abc'); // seeded tenant
   const [regDepartment, setRegDepartment] = useState('Engineering');
   const [regRole, setRegRole] = useState('employee');
 
@@ -60,7 +60,7 @@ export function LoginView() {
         name: regName.trim(),
         email: regEmail.trim(),
         password: regPassword,
-        orgId: regOrgId.trim() || 'abctech',
+        orgId: regOrgId.trim() || 'org_abc',
         department: regDepartment,
         role: regRole,
       });
@@ -75,9 +75,9 @@ export function LoginView() {
   const handleQuickLogin = async (acc) => {
     if (mode !== 'login') setMode('login');
     setLoginEmail(acc.email);
-    setLoginPassword('Password123!');
+    setLoginPassword(DEMO_PASSWORD);
     try {
-      const u = await login(acc.email, 'Password123!');
+      const u = await login(acc.email, DEMO_PASSWORD);
       toast.success(`Switched to ${acc.label}`, {
         description: `Logged in as ${u.name} (${u.role})`,
       });
@@ -147,7 +147,7 @@ export function LoginView() {
             <span className="flex items-center gap-1">
               <ShieldCheck className="w-3.5 h-3.5 text-emerald-500" /> AES-256 JWT & RBAC Gates
             </span>
-            <span className="font-mono text-zinc-400">Org: abctech</span>
+            <span className="font-mono text-zinc-400">Org: org_abc</span>
           </div>
         </div>
 
@@ -250,7 +250,7 @@ export function LoginView() {
 
               <div className="pt-2 text-center">
                 <span className="text-[11px] text-zinc-500">
-                  Demo password: <code className="text-zinc-400 font-mono">Password123!</code>
+                  Demo password: <code className="text-zinc-400 font-mono">{DEMO_PASSWORD}</code>
                 </span>
               </div>
             </form>
@@ -285,7 +285,7 @@ export function LoginView() {
                     value={regEmail}
                     onChange={(e) => setRegEmail(e.target.value)}
                     required
-                    placeholder="john.doe@abctech.com"
+                    placeholder="name@yopmail.com"
                     className="w-full pl-9 pr-3 py-2 bg-zinc-900/80 border border-zinc-800 rounded-lg text-xs text-zinc-100 focus:outline-none focus:border-zinc-600 transition-colors placeholder:text-zinc-500"
                   />
                 </div>
@@ -302,7 +302,7 @@ export function LoginView() {
                     value={regPassword}
                     onChange={(e) => setRegPassword(e.target.value)}
                     required
-                    placeholder="Password123!"
+                    placeholder="e.g. Test@123"
                     className="w-full pl-9 pr-3 py-2 bg-zinc-900/80 border border-zinc-800 rounded-lg text-xs text-zinc-100 focus:outline-none focus:border-zinc-600 transition-colors placeholder:text-zinc-500"
                   />
                 </div>

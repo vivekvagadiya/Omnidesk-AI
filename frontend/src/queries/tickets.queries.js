@@ -43,7 +43,10 @@ export function useCreateTicketMutation() {
       toast.success('Support Ticket Created', {
         description: `Ticket ${ticket?.ticketId || ''} created under ${variables.category}.`,
       });
-      return queryClient.invalidateQueries({ queryKey: queryKeys.tickets.all });
+      return Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.tickets.all }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.notifications.all }),
+      ]);
     },
     // No errorTitle: the create-ticket form shows the error inline
   });

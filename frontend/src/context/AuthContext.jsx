@@ -18,38 +18,57 @@ import {
 
 const AuthContext = createContext(null);
 
+/** Password shared by every seeded test account (backend/scripts/seed.js) */
+export const DEMO_PASSWORD = 'Test@123';
+
 export const PRESEEDED_ACCOUNTS = [
   {
     name: 'Sarah Jenkins',
-    email: 'sarah.j@abctech.com',
+    email: 'sarah@yopmail.com',
     role: 'employee',
     department: 'Engineering',
     label: 'Employee',
-    description: 'Engineering Staff (Reports to David)',
+    description: 'Engineering · reports to David',
+  },
+  {
+    name: 'James Carter',
+    email: 'james@yopmail.com',
+    role: 'employee',
+    department: 'Engineering',
+    label: 'Employee',
+    description: 'Engineering · reports to David',
   },
   {
     name: 'David Miller',
-    email: 'david.m@abctech.com',
+    email: 'david@yopmail.com',
     role: 'manager',
     department: 'Engineering',
     label: 'Manager',
-    description: 'Engineering Team Manager',
+    description: 'Engineering manager · team: Sarah, James',
   },
   {
     name: 'Marcus Vance',
-    email: 'it.admin@abctech.com',
+    email: 'marcus@yopmail.com',
     role: 'it_admin',
     department: 'IT Infrastructure',
     label: 'IT Admin',
-    description: 'Hardware & Access Controller',
+    description: 'Hardware & access · IT ticket queue',
   },
   {
     name: 'Alex Morgan',
-    email: 'hr.admin@abctech.com',
+    email: 'alex@yopmail.com',
     role: 'hr_admin',
     department: 'Human Resources',
     label: 'HR Admin',
-    description: 'Policy & People Ops Admin',
+    description: 'Policies & people ops · HR ticket queue',
+  },
+  {
+    name: 'Priya Sharma',
+    email: 'priya@yopmail.com',
+    role: 'employee',
+    department: 'Human Resources',
+    label: 'Employee',
+    description: 'HR · reports to Alex (not on David\'s team)',
   },
 ];
 
@@ -101,7 +120,7 @@ export function AuthProvider({ children }) {
   }, [resetSession]);
 
   const login = useCallback(
-    async (email, password = 'Password123!', { rememberMe = true } = {}) => {
+    async (email, password = DEMO_PASSWORD, { rememberMe = true } = {}) => {
       setError(null);
       try {
         const { user: userData, accessToken: token, refreshToken } = await loginAsync({

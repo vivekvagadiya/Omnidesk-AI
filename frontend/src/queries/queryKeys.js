@@ -15,6 +15,12 @@ export const queryKeys = {
     all: ['profile'],
     balance: (userId) => ['profile', 'balance', userId],
   },
+  notifications: {
+    all: ['notifications'],
+    unreadCount: (userId) => ['notifications', 'unread', userId],
+    lists: () => ['notifications', 'list'],
+    list: (userId) => ['notifications', 'list', userId],
+  },
   tickets: {
     all: ['tickets'],
     lists: () => ['tickets', 'list'],

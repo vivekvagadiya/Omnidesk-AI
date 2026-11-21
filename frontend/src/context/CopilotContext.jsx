@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useCallback } from 'react';
+import React, { createContext, useContext, useState } from 'react';
 import { toast } from 'sonner';
 import { copilotService } from '../services';
 import { useAuth } from './AuthContext';
@@ -37,9 +37,6 @@ export function CopilotProvider({ children }) {
   const [citationsList, setCitationsList] = useState([]);
   const [selectedCitation, setSelectedCitation] = useState(null);
   const [isCitationDrawerOpen, setIsCitationDrawerOpen] = useState(false);
-
-  const [notificationsCount, setNotificationsCount] = useState(2);
-  const incrementNotifications = useCallback(() => setNotificationsCount((c) => c + 1), []);
 
   const { mutateAsync: approveAsync } = useApproveActionMutation();
   const { mutateAsync: rejectAsync } = useRejectActionMutation();
@@ -233,7 +230,6 @@ export function CopilotProvider({ children }) {
           : msg
       )
     );
-    incrementNotifications();
 
     toast.success('Action Approved & Executed', {
       description: res.data?.message || 'Database mutation committed and notification queued.',
@@ -277,9 +273,7 @@ export function CopilotProvider({ children }) {
         isCitationDrawerOpen,
         openCitation,
         closeCitationDrawer,
-        // Actions & notifications
-        notificationsCount,
-        incrementNotifications,
+        // HITL actions
         approveAction,
         rejectAction,
       }}

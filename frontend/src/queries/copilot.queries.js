@@ -8,7 +8,7 @@ import { queryKeys } from './queryKeys';
  * HITL approvals so the side panels refresh without a manual reload.
  */
 const TOOL_INVALIDATIONS = {
-  createTicket: [queryKeys.tickets.all],
+  createTicket: [queryKeys.tickets.all, queryKeys.notifications.all],
   applyLeave: [queryKeys.profile.all, queryKeys.tickets.all],
   requestHardwareUpgrade: [queryKeys.tickets.all],
 };
@@ -44,6 +44,7 @@ export function useApproveActionMutation() {
       Promise.all([
         queryClient.invalidateQueries({ queryKey: queryKeys.profile.all }),
         queryClient.invalidateQueries({ queryKey: queryKeys.tickets.all }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.notifications.all }),
       ]),
     meta: { errorTitle: 'Approval Failed' },
   });
