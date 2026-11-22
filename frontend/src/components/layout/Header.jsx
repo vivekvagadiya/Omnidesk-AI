@@ -1,10 +1,10 @@
 import React from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useCopilot } from '../../context/CopilotContext';
-import { LogOut, ChevronRight } from 'lucide-react';
+import { LogOut, ChevronRight, ShieldCheck } from 'lucide-react';
 import { NotificationBell } from './NotificationBell';
 
-export function Header() {
+export function Header({ onToggleAudit, isAuditOpen }) {
   const { user, logout } = useAuth();
   const { sessionId } = useCopilot();
 
@@ -54,8 +54,22 @@ export function Header() {
         <span className="text-zinc-400 font-mono text-[10px]">{sessionId.substring(0, 16)}...</span>
       </div>
 
-      {/* Right Controls: Notification Bell, User Card & Logout */}
-      <div className="flex items-center gap-3">
+      {/* Right Controls: Audit & Telemetry, Notification Bell, User Card & Logout */}
+      <div className="flex items-center gap-2.5">
+        <button
+          type="button"
+          onClick={onToggleAudit}
+          title="Cryptographic Audit Ledger & Live Telemetry"
+          className={`px-2.5 py-1 rounded-lg border text-[11px] font-mono transition-colors flex items-center gap-1.5 ${
+            isAuditOpen
+              ? 'bg-zinc-800 text-emerald-400 border-zinc-700'
+              : 'bg-[#12151c] text-zinc-300 hover:text-white hover:bg-zinc-800 border-zinc-800'
+          }`}
+        >
+          <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+          <span className="hidden lg:inline">Audit & Telemetry</span>
+        </button>
+
         <NotificationBell />
 
         {/* User Identity Chip */}

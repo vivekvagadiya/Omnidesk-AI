@@ -3,6 +3,9 @@ import { toast } from 'sonner';
 import { useAuth } from '../../context/AuthContext';
 import { useLeaveBalanceQuery, useTicketsQuery, useUploadDocumentMutation } from '../../queries';
 import { CreateTicketModal } from '../ops/CreateTicketModal';
+import { TicketDetailModal } from '../ops/TicketDetailModal';
+import { AssetInventoryModal } from '../ops/AssetInventoryModal';
+import { PolicyLibraryModal } from '../ops/PolicyLibraryModal';
 import {
   Calendar,
   Ticket,
@@ -13,12 +16,18 @@ import {
   AlertCircle,
   FileCheck2,
   FileText,
+  Laptop,
+  Layers,
+  ChevronRight,
 } from 'lucide-react';
 
 export function LeftOpsPanel() {
   const { user } = useAuth();
   const [ticketScope, setTicketScope] = useState('mine'); // 'mine' | 'all'
   const [isTicketModalOpen, setIsTicketModalOpen] = useState(false);
+  const [selectedTicket, setSelectedTicket] = useState(null);
+  const [isAssetModalOpen, setIsAssetModalOpen] = useState(false);
+  const [isPolicyModalOpen, setIsPolicyModalOpen] = useState(false);
 
   const balanceQuery = useLeaveBalanceQuery();
   const leaveBalance = balanceQuery.data;
@@ -87,7 +96,7 @@ export function LeftOpsPanel() {
     <aside className="w-64 md:w-72 border-r border-zinc-800/90 bg-[#0c0e14] flex flex-col h-[calc(100vh-3rem)] select-none">
       <div className="flex-1 overflow-y-auto p-3.5 space-y-4 text-xs">
         
-        {/* User Card */}
+        {/* User Identity Card */}
         <div className="p-3 bg-[#11131a] rounded-xl border border-zinc-800 space-y-2">
           <div className="flex items-center gap-2.5">
             <div className="w-8 h-8 rounded-lg bg-zinc-800 border border-zinc-700 flex items-center justify-center font-bold text-xs text-zinc-200">
@@ -172,6 +181,27 @@ export function LeftOpsPanel() {
           </div>
         </div>
 
+        {/* Hardware Assets Hub Shortcut */}
+        <div className="p-2.5 bg-[#11131a] rounded-xl border border-zinc-800 flex items-center justify-between hover:border-zinc-700 transition-colors">
+          <div className="flex items-center gap-2">
+            <Laptop className="w-3.5 h-3.5 text-blue-400" />
+            <div>
+              <div className="text-xs font-medium text-zinc-200">Hardware Assets</div>
+              <div className="text-[10px] text-zinc-500 font-mono">
+                {user?.role === 'it_admin' ? 'Inventory & Requisitions' : 'Assigned Devices'}
+              </div>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setIsAssetModalOpen(true)}
+            className="px-2 py-1 rounded bg-zinc-900 hover:bg-zinc-800 text-[10px] font-mono text-zinc-300 border border-zinc-800 transition-colors flex items-center gap-0.5"
+          >
+            <span>View</span>
+            <ChevronRight className="w-3 h-3 text-zinc-500" />
+          </button>
+        </div>
+
         {/* Tickets Hub */}
         <div className="space-y-2">
           <div className="flex items-center justify-between">
@@ -238,7 +268,10 @@ export function LeftOpsPanel() {
               tickets.map((t) => (
                 <div
                   key={t.ticketId || t._id}
-                  className="p-2 bg-[#11131a] rounded-lg border border-zinc-800 hover:border-zinc-700 transition-colors"
+                  onClick={() => setSelectedTicket(t)}
+                  role="button"
+                  tabIndex={0}
+                  className="p-2 bg-[#11131a] rounded-lg border border-zinc-800 hover:border-zinc-600 hover:bg-zinc-850 cursor-pointer transition-all active:scale-[0.99]"
                 >
                   <div className="flex items-center justify-between mb-1">
                     <span className="font-mono text-[10px] text-zinc-400">{t.ticketId}</span>
@@ -272,7 +305,13 @@ export function LeftOpsPanel() {
               <span className="text-[11px] font-mono uppercase text-zinc-400 tracking-wider flex items-center gap-1.5">
                 <UploadCloud className="w-3.5 h-3.5 text-zinc-400" /> Policy Ingestion
               </span>
-              <span className="text-[10px] font-mono text-zinc-400">RAG (Qdrant)</span>
+              <button
+                type="button"
+                onClick={() => setIsPolicyModalOpen(true)}
+                className="text-[10px] font-mono text-zinc-400 hover:text-emerald-400 underline transition-colors"
+              >
+                View Library
+              </button>
             </div>
 
             <label className="block p-3 rounded-xl border border-dashed border-zinc-800 hover:border-zinc-700 bg-[#11131a] cursor-pointer text-center transition-colors group">
@@ -314,6 +353,22 @@ export function LeftOpsPanel() {
       <CreateTicketModal
         isOpen={isTicketModalOpen}
         onClose={() => setIsTicketModalOpen(false)}
+      />
+
+      <TicketDetailModal
+        isOpen={Boolean(selectedTicket)}
+        ticket={selectedTicket}
+        onClose={() => setSelectedTicket(null)}
+      />
+
+      <AssetInventoryModal
+        isOpen={isAssetModalOpen}
+        onClose={() => setIsAssetModalOpen(false)}
+      />
+
+      <PolicyLibraryModal
+        isOpen={isPolicyModalOpen}
+        onClose={() => setIsPolicyModalOpen(false)}
       />
     </aside>
   );

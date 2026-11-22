@@ -25,4 +25,12 @@ export const ticketService = {
     });
     return response.data.data;
   },
+
+  /**
+   * Update an existing ticket status, priority, or assignment
+   */
+  async updateTicket(ticketId, updates) {
+    const response = await apiClient.patch(`/tickets/${ticketId}`, updates);
+    return response.data.data;
+  },
 };

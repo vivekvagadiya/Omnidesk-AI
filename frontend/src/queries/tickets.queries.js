@@ -51,3 +51,22 @@ export function useCreateTicketMutation() {
     // No errorTitle: the create-ticket form shows the error inline
   });
 }
+
+export function useUpdateTicketMutation() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({ ticketId, updates }) => ticketService.updateTicket(ticketId, updates),
+    onSuccess: (ticket) => {
+      toast.success('Ticket Updated', {
+        description: `Ticket ${ticket?.ticketId || ''} updated to ${ticket?.status || 'new state'}.`,
+      });
+      return Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.tickets.all }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.notifications.all }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.audit.all }),
+      ]);
+    },
+    meta: { errorTitle: 'Update Failed' },
+  });
+}

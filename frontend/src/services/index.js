@@ -20,3 +20,5 @@ export { copilotService } from './copilot.service';
 export { ticketService } from './ticket.service';
 export { profileService } from './profile.service';
 export { notificationService } from './notification.service';
+export { assetService } from './asset.service';
+export { auditService } from './audit.service';

@@ -26,4 +26,18 @@ export const queryKeys = {
     lists: () => ['tickets', 'list'],
     list: (userId, filters) => ['tickets', 'list', userId, filters],
   },
+  assets: {
+    all: ['assets'],
+    list: (filters) => ['assets', 'list', filters],
+    tag: (tag) => ['assets', 'tag', tag],
+  },
+  audit: {
+    all: ['audit'],
+    list: (filters) => ['audit', 'list', filters],
+    verify: () => ['audit', 'verify'],
+  },
+  documents: {
+    all: ['documents'],
+    list: () => ['documents', 'list'],
+  },
 };

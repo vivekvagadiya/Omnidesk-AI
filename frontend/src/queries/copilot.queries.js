@@ -1,5 +1,5 @@
 import { useCallback } from 'react';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { copilotService } from '../services/copilot.service';
 import { queryKeys } from './queryKeys';
 
@@ -58,8 +58,20 @@ export function useRejectActionMutation() {
 }
 
 export function useUploadDocumentMutation() {
+  const queryClient = useQueryClient();
+
   return useMutation({
     mutationFn: ({ file, department, allowedRoles }) => copilotService.uploadDocument(file, department, allowedRoles),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.documents.all }),
     // No errorTitle: the upload panel reports progress and errors itself
+  });
+}
+
+export function useDocumentsQuery({ enabled = true } = {}) {
+  return useQuery({
+    queryKey: queryKeys.documents.list(),
+    queryFn: ({ signal }) => copilotService.listDocuments({ signal }),
+    enabled,
+    meta: { errorTitle: 'Could not fetch policy documents' },
   });
 }

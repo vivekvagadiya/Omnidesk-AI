@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { Toaster } from 'sonner';
 import { useAuth } from './context/AuthContext';
 import { CopilotProvider } from './context/CopilotContext';
@@ -7,9 +7,11 @@ import { Header } from './components/layout/Header';
 import { LeftOpsPanel } from './components/layout/LeftOpsPanel';
 import { ChatContainer } from './components/chat/ChatContainer';
 import { RightCitationDrawer } from './components/drawer/RightCitationDrawer';
+import { AuditTelemetryDrawer } from './components/drawer/AuditTelemetryDrawer';
 
 export function App() {
   const { isAuthenticated, user } = useAuth();
+  const [isAuditDrawerOpen, setIsAuditDrawerOpen] = useState(false);
 
   return (
     <>
@@ -37,10 +39,13 @@ export function App() {
         <CopilotProvider key={user.userId}>
           <div className="flex flex-col h-screen w-screen overflow-hidden bg-[#090a0f] text-zinc-100 font-sans antialiased">
             {/* Top Application Header */}
-            <Header />
+            <Header
+              onToggleAudit={() => setIsAuditDrawerOpen((prev) => !prev)}
+              isAuditOpen={isAuditDrawerOpen}
+            />
 
             {/* 3-Panel Enterprise Layout */}
-            <div className="flex flex-1 overflow-hidden">
+            <div className="flex flex-1 overflow-hidden relative">
               {/* Left Panel: Operations & Live Quotas */}
               <LeftOpsPanel />
 
@@ -49,6 +54,12 @@ export function App() {
 
               {/* Right Panel: Citation Evidence Drawer (Collapsible) */}
               <RightCitationDrawer />
+
+              {/* Collapsible Cryptographic Audit & Telemetry Drawer */}
+              <AuditTelemetryDrawer
+                isOpen={isAuditDrawerOpen}
+                onClose={() => setIsAuditDrawerOpen(false)}
+              />
             </div>
           </div>
         </CopilotProvider>

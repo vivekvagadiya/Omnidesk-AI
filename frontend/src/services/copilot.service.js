@@ -109,4 +109,12 @@ export const copilotService = {
 
     return response.data;
   },
+
+  /**
+   * List ingested policy documents indexed in Qdrant
+   */
+  async listDocuments({ signal } = {}) {
+    const response = await apiClient.get('/copilot/documents', { signal });
+    return response.data.data;
+  },
 };
