@@ -1,9 +1,5 @@
-import crypto from 'node:crypto';
 import { AuditLog } from '../../models/AuditLog.model.js';
 import { User } from '../../models/User.model.js';
-
-// In-memory fallback for offline test / sandbox environments
-export const memAuditLogs = [];
 
 export const AUDIT_ADMIN_ROLES = ['super_admin', 'org_admin', 'hr_admin', 'it_admin'];
 
@@ -15,174 +11,192 @@ export class AuditServiceError extends Error {
   }
 }
 
+const SENSITIVE_KEY_REGEX = /^(password|token|refreshtoken|authorization|secret|apikey|access_token|id_token|cookie)$/i;
+
 /**
- * Sanitize an audit log record into a safe, role-scoped Data Transfer Object (DTO)
- * Strips MongoDB internals (__v, _id), cryptographic hash chaining internals (hash, previousHash),
- * and redacts/sanitizes payload fields based on caller privileges.
+ * Recursively strips sensitive keys such as passwords, tokens, and credentials
+ * to ensure sensitive secrets are never stored in the audit log or exposed.
  *
- * @param {Object} log Raw audit document or memory object
- * @param {string} role Caller's corporate role
- * @returns {Object} Sanitized DTO
+ * @param {*} data
+ * @returns {*} Sanitized data
+ */
+export function redactSensitiveData(data) {
+  if (!data || typeof data !== 'object') {
+    return data;
+  }
+
+  if (Array.isArray(data)) {
+    return data.map((item) => redactSensitiveData(item));
+  }
+
+  const sanitized = {};
+  for (const [key, value] of Object.entries(data)) {
+    if (SENSITIVE_KEY_REGEX.test(key)) {
+      continue;
+    }
+    if (value && typeof value === 'object') {
+      sanitized[key] = redactSensitiveData(value);
+    } else {
+      sanitized[key] = value;
+    }
+  }
+  return sanitized;
+}
+
+/**
+ * Transforms an AuditLog document into a safe, role-scoped Data Transfer Object (DTO).
+ * Redacts sensitive metadata or internal change details based on caller corporate privileges.
+ *
+ * @param {Object} log Raw audit document or plain object
+ * @param {string} [role='employee'] Caller's corporate role
+ * @returns {Object|null} Sanitized DTO
  */
 export function toAuditLogDTO(log, role = 'employee') {
   if (!log) return null;
 
+  const raw = typeof log.toObject === 'function' ? log.toObject() : log;
   const isAdmin = AUDIT_ADMIN_ROLES.includes(role);
 
-  // Redact / sanitize payload based on role
-  let sanitizedPayload = {};
-  if (isAdmin && log.payload && typeof log.payload === 'object') {
-    // For admins: include payload but sanitize any sensitive credential fields
-    sanitizedPayload = { ...log.payload };
-    delete sanitizedPayload.password;
-    delete sanitizedPayload.token;
-    delete sanitizedPayload.refreshToken;
-    delete sanitizedPayload.authorization;
-  } else if (log.payload && typeof log.payload === 'object') {
-    // For non-admins (employees and managers): safe high-level metadata only
-    // Redacting internal parameters, PII, and confidential justifications
-    if (log.payload.title) sanitizedPayload.title = log.payload.title;
-    if (log.payload.category) sanitizedPayload.category = log.payload.category;
-    if (log.payload.priority) sanitizedPayload.priority = log.payload.priority;
-    if (log.payload.status) sanitizedPayload.status = log.payload.status;
+  const actor = {
+    userId: raw.actor?.userId || raw.actorId || '',
+    name: raw.actor?.name || raw.actorName || '',
+    role: raw.actor?.role || raw.actorRole || 'employee',
+  };
+
+  const entity = {
+    type: raw.entity?.type || null,
+    id: raw.entity?.id || raw.entityId || null,
+  };
+
+  let changes = null;
+  if (raw.changes) {
+    if (isAdmin) {
+      changes = redactSensitiveData(raw.changes);
+    } else {
+      // Non-admins see high-level summary fields if present
+      const after = raw.changes.after || raw.changes;
+      changes = {
+        after: {
+          ...(after?.title && { title: after.title }),
+          ...(after?.category && { category: after.category }),
+          ...(after?.priority && { priority: after.priority }),
+          ...(after?.status && { status: after.status }),
+        },
+      };
+    }
   }
 
+  const metadata = isAdmin && raw.metadata ? redactSensitiveData(raw.metadata) : {};
+  const createdAt = raw.createdAt || raw.timestamp || new Date().toISOString();
+  const idStr = raw._id ? raw._id.toString() : raw.logId || '';
+
   return {
-    logId: log.logId,
-    orgId: log.orgId,
-    actorId: log.actorId,
-    actorName: log.actorName || log.actorId,
-    actorRole: log.actorRole || 'employee',
-    action: log.action,
-    entityId: log.entityId || null,
-    telemetry: {
-      latencyMs: log.telemetry?.latencyMs || 0,
-      tokensUsed: {
-        prompt: log.telemetry?.tokensUsed?.prompt || 0,
-        completion: log.telemetry?.tokensUsed?.completion || 0,
-        total: log.telemetry?.tokensUsed?.total || 0,
-      },
-      model: log.telemetry?.model || 'gemini-3.8-flash',
-    },
-    timestamp: log.timestamp || log.createdAt || new Date().toISOString(),
-    payload: sanitizedPayload,
+    id: idStr,
+    logId: idStr,
+    orgId: raw.orgId,
+    actor,
+    // Flattened actor fields for UI backward-compatibility
+    actorId: actor.userId,
+    actorName: actor.name || actor.userId,
+    actorRole: actor.role,
+    action: raw.action,
+    entity,
+    entityId: entity.id,
+    changes,
+    metadata,
+    createdAt,
+    timestamp: createdAt,
   };
 }
 
 /**
- * Compute cryptographic SHA-256 hash for audit record
- */
-export function computeAuditHash({ logId, orgId, actorId, action, entityId, payload, previousHash, timestamp }) {
-  const content = JSON.stringify({
-    logId,
-    orgId,
-    actorId,
-    action,
-    entityId: entityId || null,
-    payload: payload || {},
-    previousHash: previousHash || '0'.repeat(64),
-    timestamp: typeof timestamp === 'string' ? timestamp : new Date(timestamp).toISOString(),
-  });
-
-  return crypto.createHash('sha256').update(content).digest('hex');
-}
-
-/**
- * Append an immutable, cryptographically chained audit log
+ * Append an immutable audit log entry into MongoDB.
+ * Strips any sensitive credentials before persisting.
+ * Does not use fabricated telemetry, hash chains, or silent in-memory fallback.
+ *
+ * @param {Object} params
+ * @param {string} params.orgId Organization ID (tenant)
+ * @param {Object} [params.actor] Actor details { userId, name, role }
+ * @param {string} [params.actorId] Fallback actor ID
+ * @param {string} [params.actorName] Fallback actor name
+ * @param {string} [params.actorRole] Fallback actor role
+ * @param {string} params.action Audit action name
+ * @param {Object} [params.entity] Entity details { type, id }
+ * @param {string} [params.entityId] Fallback entity ID
+ * @param {string} [params.entityType] Fallback entity type
+ * @param {Object} [params.changes] Changes object { before, after }
+ * @param {Object} [params.metadata] Network and request metadata { ipAddress, userAgent }
+ * @param {Object} [params.payload] Legacy payload mapped to changes.after
+ * @returns {Promise<Object>} Created AuditLog document
  */
 export async function recordAuditLog({
   orgId,
+  actor,
   actorId,
   actorName = '',
   actorRole = 'employee',
   action,
-  entityId = null,
-  payload = {},
-  telemetry = {},
+  entity,
+  entityId,
+  entityType,
+  changes,
+  metadata,
+  payload,
 }) {
-  const logId = `aud_${crypto.randomBytes(16).toString('hex')}`;
-  const now = new Date();
-
-  // Find previous hash for hash chaining
-  let previousHash = '0'.repeat(64);
-  try {
-    if (AuditLog.db?.readyState === 1 && typeof AuditLog.findOne === 'function') {
-      const lastEntry = await AuditLog.findOne({ orgId }).sort({ createdAt: -1 }).select('hash').lean();
-      if (lastEntry?.hash) {
-        previousHash = lastEntry.hash;
-      } else {
-        const memForOrg = memAuditLogs.filter((l) => l.orgId === orgId);
-        if (memForOrg.length > 0) {
-          previousHash = memForOrg[memForOrg.length - 1].hash;
-        }
-      }
-    } else {
-      const memForOrg = memAuditLogs.filter((l) => l.orgId === orgId);
-      if (memForOrg.length > 0) {
-        previousHash = memForOrg[memForOrg.length - 1].hash;
-      }
-    }
-  } catch {
-    const memForOrg = memAuditLogs.filter((l) => l.orgId === orgId);
-    if (memForOrg.length > 0) {
-      previousHash = memForOrg[memForOrg.length - 1].hash;
-    }
+  if (!orgId) {
+    throw new AuditServiceError('Audit log requires orgId.', 400);
+  }
+  if (!action) {
+    throw new AuditServiceError('Audit log requires action.', 400);
   }
 
-  const hash = computeAuditHash({
-    logId,
-    orgId,
-    actorId,
-    action,
-    entityId,
-    payload,
-    previousHash,
-    timestamp: now,
-  });
-
-  const entry = {
-    logId,
-    orgId,
-    actorId,
-    actorName,
-    actorRole,
-    action,
-    entityId,
-    payload,
-    previousHash,
-    hash,
-    telemetry: {
-      latencyMs: telemetry.latencyMs || Math.floor(Math.random() * 250 + 120),
-      tokensUsed: {
-        prompt: telemetry.tokensUsed?.prompt || Math.floor(Math.random() * 80 + 35),
-        completion: telemetry.tokensUsed?.completion || Math.floor(Math.random() * 120 + 40),
-        total: telemetry.tokensUsed?.total || Math.floor(Math.random() * 200 + 75),
-      },
-      model: telemetry.model || 'gemini-3.8-flash',
-      costUsd: telemetry.costUsd || 0.00012,
-    },
-    timestamp: now,
-    createdAt: now,
+  const resolvedActor = {
+    userId: actor?.userId || actorId,
+    name: actor?.name || actorName || '',
+    role: actor?.role || actorRole || 'employee',
   };
 
-  try {
-    if (AuditLog.db?.readyState === 1 && typeof AuditLog.create === 'function') {
-      await AuditLog.create(entry);
-    } else {
-      memAuditLogs.push(entry);
-    }
-  } catch (err) {
-    memAuditLogs.push(entry);
+  if (!resolvedActor.userId) {
+    throw new AuditServiceError('Audit log requires actor userId.', 400);
   }
 
-  return entry;
+  const resolvedEntity = {
+    type: entity?.type || entityType || null,
+    id: entity?.id || entityId || null,
+  };
+
+  let resolvedChanges = null;
+  if (changes) {
+    resolvedChanges = {
+      before: changes.before ? redactSensitiveData(changes.before) : null,
+      after: changes.after ? redactSensitiveData(changes.after) : null,
+    };
+  } else if (payload && Object.keys(payload).length > 0) {
+    resolvedChanges = {
+      before: null,
+      after: redactSensitiveData(payload),
+    };
+  }
+
+  const resolvedMetadata = metadata ? redactSensitiveData(metadata) : {};
+
+  const entry = {
+    orgId: orgId.trim(),
+    actor: resolvedActor,
+    action: action.trim(),
+    entity: resolvedEntity,
+    changes: resolvedChanges,
+    metadata: resolvedMetadata,
+  };
+
+  return await AuditLog.create(entry);
 }
 
 /**
  * Service: List Audit Logs with role-scoped access control & sanitized DTOs
  *
  * Scope rules:
- * - Employees: can only view their own audit logs (actorId = user.userId)
+ * - Employees: can only view their own audit logs (actor.userId = user.userId)
  * - Managers: can only view their own logs and their direct reports' logs
  * - Admins (super_admin, org_admin, hr_admin, it_admin): can view all organization logs or filter by actorId
  *
@@ -212,22 +226,19 @@ export async function getAuditLogsService({ user, orgId: explicitOrgId, action, 
   if (isAdmin) {
     // Admins can view all organization logs or filter by specific actor
     if (cleanActorId) {
-      query.actorId = cleanActorId;
+      query['actor.userId'] = cleanActorId;
     }
   } else if (isManager) {
     // Managers can view their own logs + their direct reports
     let reportIds = [];
-    if (User.db?.readyState === 1 || typeof User.find === 'function') {
-      try {
-        const reportsQuery = User.find({
-          orgId,
-          managerId: callerUser.userId,
-        }).select('userId');
-        const reports = typeof reportsQuery?.lean === 'function' ? await reportsQuery.lean() : await reportsQuery;
-        reportIds = (reports || []).map((r) => r.userId);
-      } catch {
-        reportIds = [];
-      }
+    try {
+      const reports = await User.find({
+        orgId,
+        managerId: callerUser.userId,
+      }).select('userId').lean();
+      reportIds = (reports || []).map((r) => r.userId);
+    } catch {
+      reportIds = [];
     }
     const teamActorIds = [callerUser.userId, ...reportIds];
 
@@ -238,9 +249,9 @@ export async function getAuditLogsService({ user, orgId: explicitOrgId, action, 
           403
         );
       }
-      query.actorId = cleanActorId;
+      query['actor.userId'] = cleanActorId;
     } else {
-      query.actorId = { $in: teamActorIds };
+      query['actor.userId'] = { $in: teamActorIds };
     }
   } else {
     // Employees can ONLY view their own audit logs
@@ -250,7 +261,7 @@ export async function getAuditLogsService({ user, orgId: explicitOrgId, action, 
         403
       );
     }
-    query.actorId = callerUser.userId;
+    query['actor.userId'] = callerUser.userId;
   }
 
   if (action && typeof action === 'string' && action.trim().length > 0) {
@@ -261,83 +272,15 @@ export async function getAuditLogsService({ user, orgId: explicitOrgId, action, 
   const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
   const skip = (pageNum - 1) * limitNum;
 
-  let logs = [];
-  let total = 0;
+  const [logs, total] = await Promise.all([
+    AuditLog.find(query)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limitNum)
+      .lean(),
+    AuditLog.countDocuments(query),
+  ]);
 
-  if (AuditLog.db?.readyState === 1 && typeof AuditLog.find === 'function') {
-    try {
-      const q = AuditLog.find(query)
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(limitNum);
-      logs = typeof q.lean === 'function' ? await q.lean() : await q;
-      total =
-        typeof AuditLog.countDocuments === 'function'
-          ? await AuditLog.countDocuments(query)
-          : logs
-            ? logs.length
-            : 0;
-    } catch {
-      logs = [];
-      total = 0;
-    }
-  }
-
-  // In-memory fallback if DB returned 0 records or is offline
-  if ((!logs || logs.length === 0) && memAuditLogs.length > 0) {
-    const filtered = memAuditLogs.filter((l) => {
-      if (l.orgId !== orgId) return false;
-      if (query.actorId) {
-        if (typeof query.actorId === 'string' && l.actorId !== query.actorId) return false;
-        if (query.actorId.$in && !query.actorId.$in.includes(l.actorId)) return false;
-      }
-      if (action && !new RegExp(action.trim(), 'i').test(l.action)) return false;
-      return true;
-    });
-    total = filtered.length;
-    logs = filtered
-      .slice()
-      .reverse()
-      .slice(skip, skip + limitNum);
-  }
-
-  // If still 0, auto-seed baseline audit records for this organization if needed
-  if (total === 0 && (!logs || logs.length === 0)) {
-    if (AuditLog.db?.readyState === 1 && typeof AuditLog.find === 'function') {
-      try {
-        const q = AuditLog.find(query)
-          .sort({ createdAt: -1 })
-          .skip(skip)
-          .limit(limitNum);
-        logs = typeof q.lean === 'function' ? await q.lean() : await q;
-        total =
-          typeof AuditLog.countDocuments === 'function'
-            ? await AuditLog.countDocuments(query)
-            : logs
-              ? logs.length
-              : 0;
-      } catch {
-        logs = [];
-      }
-    }
-    if ((!logs || logs.length === 0) && memAuditLogs.length > 0) {
-      const filtered = memAuditLogs.filter((l) => {
-        if (l.orgId !== orgId) return false;
-        if (query.actorId) {
-          if (typeof query.actorId === 'string' && l.actorId !== query.actorId) return false;
-          if (query.actorId.$in && !query.actorId.$in.includes(l.actorId)) return false;
-        }
-        return true;
-      });
-      total = filtered.length;
-      logs = filtered
-        .slice()
-        .reverse()
-        .slice(skip, skip + limitNum);
-    }
-  }
-
-  // Transform raw documents into sanitized DTOs
   const sanitizedLogs = (logs || []).map((log) => toAuditLogDTO(log, callerUser.role));
 
   return {
@@ -352,67 +295,61 @@ export async function getAuditLogsService({ user, orgId: explicitOrgId, action, 
 }
 
 /**
- * Seed baseline Genesis audit logs if the organization's audit ledger is empty
+ * Seed baseline audit logs if the organization's audit ledger is empty
  */
 export async function seedBaselineAuditLogs(orgId = 'org_abc') {
   try {
-    let existingCount = 0;
-    if (AuditLog.db?.readyState === 1 && typeof AuditLog.countDocuments === 'function') {
-      try {
-        existingCount = await AuditLog.countDocuments({ orgId });
-      } catch {
-        existingCount = memAuditLogs.filter((l) => l.orgId === orgId).length;
-      }
-    } else {
-      existingCount = memAuditLogs.filter((l) => l.orgId === orgId).length;
-    }
+    const existingCount = await AuditLog.countDocuments({ orgId });
 
     if (existingCount === 0) {
       await recordAuditLog({
         orgId,
-        actorId: 'system',
-        actorName: 'System Genesis',
-        actorRole: 'super_admin',
-        action: 'SYSTEM_GENESIS_INITIALIZED',
-        entityId: 'GENESIS_BLOCK',
-        payload: { message: 'Cryptographic SHA-256 Audit Chain initialized.' },
-        telemetry: {
-          latencyMs: 42,
-          tokensUsed: { prompt: 10, completion: 15, total: 25 },
-          model: 'gemini-3.8-flash',
-          costUsd: 0.00001,
+        actor: {
+          userId: 'system',
+          name: 'System Initializer',
+          role: 'super_admin',
+        },
+        action: 'SYSTEM_INITIALIZED',
+        entity: {
+          type: 'system',
+          id: 'SYS-INIT',
+        },
+        changes: {
+          after: { message: 'Audit log initialized.' },
         },
       });
 
       await recordAuditLog({
         orgId,
-        actorId: 'usr_super',
-        actorName: 'Platform Super Admin',
-        actorRole: 'super_admin',
+        actor: {
+          userId: 'usr_super',
+          name: 'Platform Super Admin',
+          role: 'super_admin',
+        },
         action: 'POLICY_INDEX_INITIALIZED',
-        entityId: 'POL-INDEX-2026',
-        payload: { department: 'ALL', status: 'SYNCHRONIZED' },
-        telemetry: {
-          latencyMs: 140,
-          tokensUsed: { prompt: 80, completion: 110, total: 190 },
-          model: 'gemini-3.8-flash',
-          costUsd: 0.00008,
+        entity: {
+          type: 'policy',
+          id: 'POL-INDEX-2026',
+        },
+        changes: {
+          after: { department: 'ALL', status: 'SYNCHRONIZED' },
         },
       });
 
       await recordAuditLog({
         orgId,
-        actorId: 'usr_org_admin',
-        actorName: 'Elena Rostova',
-        actorRole: 'org_admin',
+        actor: {
+          userId: 'usr_org_admin',
+          name: 'Elena Rostova',
+          role: 'org_admin',
+        },
         action: 'SECURITY_AUDIT_ENABLED',
-        entityId: 'SEC-GOVERNANCE',
-        payload: { standard: 'SOC2-Type-II', compliance: 'STRICT' },
-        telemetry: {
-          latencyMs: 110,
-          tokensUsed: { prompt: 40, completion: 50, total: 90 },
-          model: 'gemini-3.8-flash',
-          costUsd: 0.00005,
+        entity: {
+          type: 'security',
+          id: 'SEC-GOVERNANCE',
+        },
+        changes: {
+          after: { standard: 'SOC2-Type-II', compliance: 'STRICT' },
         },
       });
     }

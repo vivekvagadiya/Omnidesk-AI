@@ -180,17 +180,18 @@ export async function updateAssetService({ user, assetTag, updateData }) {
 
   recordAuditLog({
     orgId: user.orgId,
-    actorId: user.userId,
-    actorName: user.name || user.userId,
-    actorRole: user.role,
+    actor: {
+      userId: user.userId,
+      name: user.name || user.userId,
+      role: user.role,
+    },
     action: 'ASSET_UPDATED',
-    entityId: assetTag.trim(),
-    payload: updateFields,
-    telemetry: {
-      latencyMs: 110,
-      tokensUsed: { prompt: 40, completion: 25, total: 65 },
-      model: 'gemini-3.8-flash',
-      costUsd: 0.00003,
+    entity: {
+      type: 'asset',
+      id: assetTag.trim(),
+    },
+    changes: {
+      after: updateFields,
     },
   }).catch(() => {});
 

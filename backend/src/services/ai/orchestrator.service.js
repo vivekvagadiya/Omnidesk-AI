@@ -674,29 +674,26 @@ export async function streamCopilotTurn({
     completedAt: new Date().toISOString(),
   });
 
-  // 8. Record turn in cryptographic audit ledger
+  // 8. Record copilot interaction in audit log
   if (user?.orgId) {
     recordAuditLog({
       orgId: user.orgId,
-      actorId: user.userId,
-      actorName: user.name || user.userId,
-      actorRole: user.role || 'employee',
-      action: detectedTool ? `COPILOT_TURN:${detectedTool.tool}` : 'COPILOT_TURN:RAG_SEARCH',
-      entityId: sessionId,
-      payload: {
-        detectedTool: detectedTool?.tool || 'searchPolicies',
-        hasCitations: citationsPayload?.hasCitations || false,
-        hasActionRequired: Boolean(stagedActionPayload),
+      actor: {
+        userId: user.userId,
+        name: user.name || user.userId,
+        role: user.role || 'employee',
       },
-      telemetry: {
-        latencyMs: Math.floor(Math.random() * 200 + 150),
-        tokensUsed: {
-          prompt: Math.max(30, Math.floor(message.length / 4)),
-          completion: Math.max(20, Math.floor((unmaskedAnswer || '').length / 4)),
-          total: Math.max(50, Math.floor((message.length + (unmaskedAnswer || '').length) / 4)),
+      action: detectedTool ? `COPILOT_TURN:${detectedTool.tool}` : 'COPILOT_TURN:RAG_SEARCH',
+      entity: {
+        type: 'copilot_session',
+        id: sessionId,
+      },
+      changes: {
+        after: {
+          detectedTool: detectedTool?.tool || 'searchPolicies',
+          hasCitations: citationsPayload?.hasCitations || false,
+          hasActionRequired: Boolean(stagedActionPayload),
         },
-        model: PRIMARY_MODEL,
-        costUsd: 0.00015,
       },
     }).catch(() => {});
   }

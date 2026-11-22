@@ -243,16 +243,17 @@ export async function stageActionToken({
 
   recordAuditLog({
     orgId,
-    actorId: userId,
-    actorRole: 'employee',
+    actor: {
+      userId,
+      role: 'employee',
+    },
     action: `HITL_ACTION_STAGED:${type}`,
-    entityId: actionId,
-    payload,
-    telemetry: {
-      latencyMs: 145,
-      tokensUsed: { prompt: 75, completion: 45, total: 120 },
-      model: 'gemini-3.8-flash',
-      costUsd: 0.00005,
+    entity: {
+      type: 'staged_action',
+      id: actionId,
+    },
+    changes: {
+      after: payload,
     },
   }).catch(() => {});
 
@@ -418,12 +419,19 @@ export async function consumeActionToken({
     await deleteStagedAction(actionId, client);
     recordAuditLog({
       orgId: staged.orgId,
-      actorId: user.userId,
-      actorName: user.name || user.userId,
-      actorRole: user.role,
+      actor: {
+        userId: user.userId,
+        name: user.name || user.userId,
+        role: user.role,
+      },
       action: `HITL_ACTION_REJECTED:${staged.type}`,
-      entityId: actionId,
-      payload: staged.payload,
+      entity: {
+        type: 'staged_action',
+        id: actionId,
+      },
+      changes: {
+        before: staged.payload,
+      },
     }).catch(() => {});
 
     return {
@@ -577,12 +585,20 @@ export async function consumeActionToken({
 
   recordAuditLog({
     orgId: staged.orgId,
-    actorId: user.userId,
-    actorName: user.name || user.userId,
-    actorRole: user.role,
+    actor: {
+      userId: user.userId,
+      name: user.name || user.userId,
+      role: user.role,
+    },
     action: `HITL_ACTION_APPROVED:${staged.type}`,
-    entityId: actionId,
-    payload: { ...staged.payload, result: executionResult },
+    entity: {
+      type: 'staged_action',
+      id: actionId,
+    },
+    changes: {
+      before: staged.payload,
+      after: { ...staged.payload, result: executionResult },
+    },
   }).catch(() => {});
 
   return {

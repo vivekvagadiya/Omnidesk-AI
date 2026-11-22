@@ -294,22 +294,27 @@ export async function uploadDocument(req, res) {
 
     recordAuditLog({
       orgId: user.orgId,
-      actorId: user.userId,
-      actorName: user.name || user.userId,
-      actorRole: user.role,
-      action: 'DOCUMENT_UPLOADED',
-      entityId: result?.docId || req.file.originalname,
-      payload: {
-        filename: req.file.originalname,
-        department: targetDepartment,
-        allowedRoles: parsedRoles,
-        chunksIndexed: result?.chunksIndexed || 0,
+      actor: {
+        userId: user.userId,
+        name: user.name || user.userId,
+        role: user.role,
       },
-      telemetry: {
-        latencyMs: 310,
-        tokensUsed: { prompt: 140, completion: 60, total: 200 },
-        model: 'gemini-3.8-flash',
-        costUsd: 0.00008,
+      action: 'DOCUMENT_UPLOADED',
+      entity: {
+        type: 'document',
+        id: result?.docId || req.file.originalname,
+      },
+      changes: {
+        after: {
+          filename: req.file.originalname,
+          department: targetDepartment,
+          allowedRoles: parsedRoles,
+          chunksIndexed: result?.chunksIndexed || 0,
+        },
+      },
+      metadata: {
+        ipAddress: req.ip || req.headers?.['x-forwarded-for'] || null,
+        userAgent: req.headers?.['user-agent'] || null,
       },
     }).catch(() => {});
 

@@ -234,21 +234,22 @@ export async function createTicket(args = {}, context = {}) {
 
   recordAuditLog({
     orgId: user.orgId,
-    actorId: user.userId,
-    actorName: user.name || user.userId,
-    actorRole: user.role,
-    action: 'TICKET_CREATED_VIA_COPILOT',
-    entityId: ticket.ticketId,
-    payload: {
-      title: ticket.title,
-      category: ticket.category,
-      priority: ticket.priority,
+    actor: {
+      userId: user.userId,
+      name: user.name || user.userId,
+      role: user.role,
     },
-    telemetry: {
-      latencyMs: 190,
-      tokensUsed: { prompt: 85, completion: 55, total: 140 },
-      model: 'gemini-3.8-flash',
-      costUsd: 0.00007,
+    action: 'TICKET_CREATED_VIA_COPILOT',
+    entity: {
+      type: 'ticket',
+      id: ticket.ticketId,
+    },
+    changes: {
+      after: {
+        title: ticket.title,
+        category: ticket.category,
+        priority: ticket.priority,
+      },
     },
   }).catch(() => {});
 
@@ -629,21 +630,21 @@ export async function executeTool(toolName, args = {}, context = {}) {
       throw new InvalidToolError(toolName);
   }
 
-  const durationMs = Date.now() - startTime;
   if (context.user?.orgId) {
     recordAuditLog({
       orgId: context.user.orgId,
-      actorId: context.user.userId,
-      actorName: context.user.name || context.user.userId,
-      actorRole: context.user.role || 'employee',
+      actor: {
+        userId: context.user.userId,
+        name: context.user.name || context.user.userId,
+        role: context.user.role || 'employee',
+      },
       action: `TOOL_EXECUTED:${toolName}`,
-      entityId: toolName,
-      payload: { args },
-      telemetry: {
-        latencyMs: durationMs || 140,
-        tokensUsed: { prompt: 65, completion: 50, total: 115 },
-        model: 'gemini-3.8-flash',
-        costUsd: 0.00005,
+      entity: {
+        type: 'tool',
+        id: toolName,
+      },
+      changes: {
+        after: { args },
       },
     }).catch(() => {});
   }

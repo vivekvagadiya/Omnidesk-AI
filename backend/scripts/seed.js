@@ -279,10 +279,10 @@ async function seed() {
       );
     }
 
-    // 7. Seed baseline cryptographic audit logs
+    // 7. Seed baseline audit logs
     try {
       await seedBaselineAuditLogs("org_abc");
-      console.log("🔒 Cryptographic SHA-256 audit logs seeded.");
+      console.log("🔒 Baseline audit logs seeded.");
     } catch (auditErr) {
       console.warn("⚠️ [Seeder] Audit log seeding notice:", auditErr.message);
     }

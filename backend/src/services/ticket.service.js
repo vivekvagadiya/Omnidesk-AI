@@ -192,21 +192,22 @@ export async function createTicketService({ user, ticketData }) {
 
   recordAuditLog({
     orgId: user.orgId,
-    actorId: user.userId,
-    actorName: user.name || user.userId,
-    actorRole: user.role,
-    action: 'TICKET_CREATED',
-    entityId: ticketId,
-    payload: {
-      title: title.trim(),
-      category: normalizedCategory,
-      priority: normalizedPriority,
+    actor: {
+      userId: user.userId,
+      name: user.name || user.userId,
+      role: user.role,
     },
-    telemetry: {
-      latencyMs: 165,
-      tokensUsed: { prompt: 50, completion: 40, total: 90 },
-      model: 'gemini-3.8-flash',
-      costUsd: 0.00004,
+    action: 'TICKET_CREATED',
+    entity: {
+      type: 'ticket',
+      id: ticketId,
+    },
+    changes: {
+      after: {
+        title: title.trim(),
+        category: normalizedCategory,
+        priority: normalizedPriority,
+      },
     },
   }).catch(() => {});
 
@@ -285,20 +286,19 @@ export async function updateTicketService({ user, ticketId, updateData }) {
 
   recordAuditLog({
     orgId: user.orgId,
-    actorId: user.userId,
-    actorName: user.name || user.userId,
-    actorRole: user.role,
-    action: updates.status ? `TICKET_STATUS_${updates.status}` : 'TICKET_UPDATED',
-    entityId: ticketId.trim(),
-    payload: {
-      previousStatus: ticket.status,
-      updatedFields: updates,
+    actor: {
+      userId: user.userId,
+      name: user.name || user.userId,
+      role: user.role,
     },
-    telemetry: {
-      latencyMs: 125,
-      tokensUsed: { prompt: 35, completion: 30, total: 65 },
-      model: 'gemini-3.8-flash',
-      costUsd: 0.00003,
+    action: updates.status ? `TICKET_STATUS_${updates.status}` : 'TICKET_UPDATED',
+    entity: {
+      type: 'ticket',
+      id: ticketId.trim(),
+    },
+    changes: {
+      before: { status: ticket.status },
+      after: updates,
     },
   }).catch(() => {});
 

@@ -2,7 +2,7 @@ import * as auditService from '../services/audit/audit.service.js';
 import { successResponse, errorResponse } from '../utils/apiResponse.js';
 
 /**
- * Controller: List Audit Logs with SHA-256 signatures & telemetry (Thin Controller)
+ * Controller: List Corporate Audit Logs (Thin Controller)
  * Pure Controller Logic (Delegates to audit.service.js)
  * GET /api/audit-logs
  */

@@ -9,7 +9,7 @@ router.use(authenticateJwt);
 
 /**
  * @route   GET /api/audit-logs
- * @desc    List corporate audit logs with telemetry
+ * @desc    List corporate audit logs with role-based access control
  * @access  Private (Admins, Managers & Employees)
  */
 router.get(

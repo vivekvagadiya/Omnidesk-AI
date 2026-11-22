@@ -2,76 +2,92 @@ import mongoose from 'mongoose';
 
 const auditLogSchema = new mongoose.Schema(
   {
-    logId: {
-      type: String,
-      required: true,
-      unique: true,
-      trim: true,
-      index: true,
-    },
     orgId: {
       type: String,
       required: true,
       trim: true,
-      index: true,
     },
-    actorId: {
-      type: String,
-      required: true,
-      trim: true,
-      index: true,
-    },
-    actorName: {
-      type: String,
-      default: '',
-    },
-    actorRole: {
-      type: String,
-      default: 'employee',
-      index: true,
+    actor: {
+      userId: {
+        type: String,
+        required: true,
+        trim: true,
+      },
+      name: {
+        type: String,
+        default: '',
+        trim: true,
+      },
+      role: {
+        type: String,
+        default: 'employee',
+        trim: true,
+      },
     },
     action: {
       type: String,
       required: true,
-      index: true,
+      trim: true,
     },
-    entityId: {
-      type: String,
-      default: null,
-      index: true,
-    },
-    payload: {
-      type: mongoose.Schema.Types.Mixed,
-      default: {},
-    },
-    previousHash: {
-      type: String,
-      default: '0'.repeat(64),
-    },
-    hash: {
-      type: String,
-      required: true,
-      index: true,
-    },
-    telemetry: {
-      latencyMs: { type: Number, default: 0 },
-      tokensUsed: {
-        prompt: { type: Number, default: 0 },
-        completion: { type: Number, default: 0 },
-        total: { type: Number, default: 0 },
+    entity: {
+      type: {
+        type: String,
+        default: null,
+        trim: true,
       },
-      model: { type: String, default: 'gemini-3.8-flash' },
-      costUsd: { type: Number, default: 0 },
+      id: {
+        type: String,
+        default: null,
+        trim: true,
+      },
     },
-    timestamp: {
-      type: Date,
-      default: Date.now,
-      index: true,
+    changes: {
+      before: {
+        type: mongoose.Schema.Types.Mixed,
+        default: null,
+      },
+      after: {
+        type: mongoose.Schema.Types.Mixed,
+        default: null,
+      },
+    },
+    metadata: {
+      ipAddress: {
+        type: String,
+        default: null,
+        trim: true,
+      },
+      userAgent: {
+        type: String,
+        default: null,
+        trim: true,
+      },
     },
   },
   {
-    timestamps: true,
+    timestamps: { createdAt: true, updatedAt: false },
+    versionKey: false,
   }
 );
+
+// Compound indexes for tenant isolation, actor, action, and chronological ordering
+auditLogSchema.index({ orgId: 1, createdAt: -1 });
+auditLogSchema.index({ orgId: 1, 'actor.userId': 1, createdAt: -1 });
+auditLogSchema.index({ orgId: 1, action: 1, createdAt: -1 });
+auditLogSchema.index({ orgId: 1, 'actor.userId': 1, action: 1, createdAt: -1 });
+
+// Safeguard append-only nature at model level
+const preventMutation = function () {
+  throw new Error('AuditLog is append-only: updates and deletions are not permitted.');
+};
+
+auditLogSchema.pre('updateOne', preventMutation);
+auditLogSchema.pre('updateMany', preventMutation);
+auditLogSchema.pre('findOneAndUpdate', preventMutation);
+auditLogSchema.pre('replaceOne', preventMutation);
+auditLogSchema.pre('deleteOne', preventMutation);
+auditLogSchema.pre('deleteMany', preventMutation);
+auditLogSchema.pre('findOneAndDelete', preventMutation);
+auditLogSchema.pre('findOneAndRemove', preventMutation);
 
 export const AuditLog = mongoose.model('AuditLog', auditLogSchema);
