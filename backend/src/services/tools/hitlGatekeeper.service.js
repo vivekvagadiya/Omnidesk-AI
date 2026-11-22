@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
-import { getRedisClient } from '../../config/redis.js';
+import { getRedisClient, isRedisReady } from '../../config/redis.js';
+import { config } from '../../config/environment.js';
 import { User } from '../../models/User.model.js';
 import { Ticket } from '../../models/Ticket.model.js';
 import { invalidateTicketCaches, invalidateBalanceCaches } from '../cache/cache.service.js';
@@ -227,15 +228,20 @@ export async function stageActionToken({
   const serialized = JSON.stringify(stagedAction);
 
   // 1. Write to live Redis if connected
-  if (client && client.isOpen) {
+  if (client && (client.isReady || client.isOpen)) {
     try {
       await client.set(redisKey, serialized, { EX: ttlSeconds });
     } catch (err) {
+      if (config.nodeEnv === 'production') {
+        throw new HITLError(`Failed to stage action: State Redis error - ${err.message}`, 503);
+      }
       console.warn(`⚠️ [HITL Gatekeeper] Redis set error: ${err.message}. Falling back to memory store.`);
       hitlMemoryStore.set(redisKey, stagedAction);
     }
+  } else if (config.nodeEnv === 'production') {
+    throw new HITLError('Unable to stage action: State Redis is unavailable.', 503);
   } else {
-    // 2. Fallback to in-memory store
+    // 2. Fallback to in-memory store in non-production environments
     hitlMemoryStore.set(redisKey, stagedAction);
   }
 
@@ -277,15 +283,20 @@ export async function getStagedAction(actionId, client = getRedisClient()) {
   const redisKey = `${ACTION_PREFIX}${actionId}`;
 
   // 1. Check Redis if connected
-  if (client && client.isOpen) {
+  if (client && (client.isReady || client.isOpen)) {
     try {
       const raw = await client.get(redisKey);
       if (raw) {
         return JSON.parse(raw);
       }
     } catch (err) {
+      if (config.nodeEnv === 'production') {
+        throw new HITLError(`Failed to retrieve staged action: State Redis error - ${err.message}`, 503);
+      }
       console.warn(`⚠️ [HITL Gatekeeper] Redis get error: ${err.message}. Checking memory fallback.`);
     }
+  } else if (config.nodeEnv === 'production') {
+    throw new HITLError('Unable to retrieve staged action: State Redis is unavailable.', 503);
   }
 
   // 2. Check in-memory store
