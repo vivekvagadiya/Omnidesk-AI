@@ -5,6 +5,7 @@ import { Ticket } from '../../models/Ticket.model.js';
 import { invalidateTicketCaches, invalidateBalanceCaches } from '../cache/cache.service.js';
 import { notify } from '../notifications/notification.service.js';
 import { Asset } from '../../models/Asset.model.js';
+import { recordAuditLog } from '../audit/audit.service.js';
 
 export const ACTION_TOKEN_TTL_SECONDS = 900; // 15 minutes TTL
 export const ACTION_PREFIX = 'action:';
@@ -354,9 +355,62 @@ export async function consumeActionToken({
     throw new UnauthorizedActionError('Tenant isolation violation: Staged action belongs to a different organization.');
   }
 
-  // 4. Handle REJECTION: Clean up token and return status
+  // 4. Role & Ownership Authorization Verification
+  const isOwner = staged.userId === user.userId;
+  const isSuperOrOrgAdmin = ['super_admin', 'org_admin'].includes(user.role);
+
+  let isAuthorized = isOwner || isSuperOrOrgAdmin;
+
+  if (!isAuthorized) {
+    if (staged.type === ACTION_TYPES.APPLY_LEAVE) {
+      if (user.role === 'hr_admin') {
+        isAuthorized = true;
+      } else if (user.role === 'manager') {
+        // Manager can authorize if the requesting user reports to them
+        if (User.db?.readyState === 1 || typeof User.findOne === 'function') {
+          const report = await User.findOne({
+            orgId: user.orgId,
+            userId: staged.userId,
+            managerId: user.userId,
+          }).select('userId').lean();
+          if (report) isAuthorized = true;
+        }
+      }
+    } else if (staged.type === ACTION_TYPES.REQUEST_HARDWARE_UPGRADE) {
+      if (user.role === 'it_admin') {
+        isAuthorized = true;
+      } else if (user.role === 'manager') {
+        if (User.db?.readyState === 1 || typeof User.findOne === 'function') {
+          const report = await User.findOne({
+            orgId: user.orgId,
+            userId: staged.userId,
+            managerId: user.userId,
+          }).select('userId').lean();
+          if (report) isAuthorized = true;
+        }
+      }
+    }
+  }
+
+  if (!isAuthorized) {
+    throw new UnauthorizedActionError(
+      `Access denied: Role '${user.role}' lacks permission to authorize or reject this ${staged.type} action.`
+    );
+  }
+
+  // 5. Handle REJECTION: Clean up token and return status
   if (normalizedDecision === 'REJECT') {
     await deleteStagedAction(actionId, client);
+    recordAuditLog({
+      orgId: staged.orgId,
+      actorId: user.userId,
+      actorName: user.name || user.userId,
+      actorRole: user.role,
+      action: `HITL_ACTION_REJECTED:${staged.type}`,
+      entityId: actionId,
+      payload: staged.payload,
+    }).catch(() => {});
+
     return {
       success: true,
       actionId,
@@ -505,6 +559,16 @@ export async function consumeActionToken({
 
   // 6. Delete action token from Redis to ensure single-use (prevent replay attacks)
   await deleteStagedAction(actionId, client);
+
+  recordAuditLog({
+    orgId: staged.orgId,
+    actorId: user.userId,
+    actorName: user.name || user.userId,
+    actorRole: user.role,
+    action: `HITL_ACTION_APPROVED:${staged.type}`,
+    entityId: actionId,
+    payload: { ...staged.payload, result: executionResult },
+  }).catch(() => {});
 
   return {
     success: true,

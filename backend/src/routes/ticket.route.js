@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { getTickets, createTicket, ADMIN_ROLES } from '../controllers/ticket.controller.js';
+import { getTickets, createTicket, updateTicket, ADMIN_ROLES } from '../controllers/ticket.controller.js';
 import { authenticateJwt } from '../middlewares/auth.middleware.js';
 import { cacheResponse } from '../middlewares/cache.middleware.js';
 import { CACHE_TTL, cacheTags } from '../services/cache/cache.service.js';
@@ -56,5 +56,12 @@ router.get(
  * @cache   Controller calls invalidateTicketCaches (same helper the chat tools use)
  */
 router.post('/', createTicket);
+
+/**
+ * @route   PATCH /api/tickets/:ticketId
+ * @desc    Update ticket status, priority, or assignment
+ * @access  Private (Owner, Manager, Admin)
+ */
+router.patch('/:ticketId', updateTicket);
 
 export default router;

@@ -191,3 +191,92 @@ export async function createTicket(req, res) {
     });
   }
 }
+
+/**
+ * Controller: Update Ticket (Status, Priority, Assignment)
+ * PATCH /api/tickets/:ticketId
+ */
+export async function updateTicket(req, res) {
+  const user = req.user;
+  const { ticketId } = req.params;
+  const { status, priority, assignedTo, resolutionNotes } = req.body;
+
+  if (!user || !user.orgId) {
+    return errorResponse(res, {
+      statusCode: 401,
+      message: 'Unauthorized: Valid user credentials required.',
+    });
+  }
+
+  if (!ticketId) {
+    return errorResponse(res, {
+      statusCode: 400,
+      message: 'Parameter ticketId is required.',
+    });
+  }
+
+  try {
+    let ticket = null;
+    if (typeof Ticket.findOne === 'function') {
+      const q = Ticket.findOne({ ticketId: ticketId.trim(), orgId: user.orgId });
+      ticket = typeof q.lean === 'function' ? await q.lean() : await q;
+    }
+
+    if (!ticket) {
+      return errorResponse(res, {
+        statusCode: 404,
+        message: `Ticket '${ticketId}' was not found.`,
+      });
+    }
+
+    const isAdmin = ADMIN_ROLES.includes(user.role);
+    const isOwner = ticket.userId === user.userId;
+    const isManager = user.role === 'manager';
+
+    if (!isAdmin && !isOwner && !isManager) {
+      return errorResponse(res, {
+        statusCode: 403,
+        message: 'Access Denied: You do not have permission to modify this ticket.',
+      });
+    }
+
+    const updates = {};
+    if (status && TICKET_STATUSES.includes(status.toUpperCase())) {
+      updates.status = status.toUpperCase();
+    }
+    if (priority && TICKET_PRIORITIES.includes(priority.toUpperCase()) && (isAdmin || isManager)) {
+      updates.priority = priority.toUpperCase();
+    }
+    if (assignedTo !== undefined && (isAdmin || isManager)) {
+      updates.assignedTo = assignedTo ? assignedTo.trim() : null;
+    }
+    if (resolutionNotes) {
+      updates['metadata.resolutionNotes'] = resolutionNotes.trim();
+      updates['metadata.resolvedAt'] = new Date().toISOString();
+      updates['metadata.resolvedBy'] = user.userId;
+    }
+
+    let updatedTicket = null;
+    if (typeof Ticket.findOneAndUpdate === 'function') {
+      updatedTicket = await Ticket.findOneAndUpdate(
+        { ticketId: ticketId.trim(), orgId: user.orgId },
+        { $set: updates },
+        { new: true }
+      );
+    }
+
+    // Refresh ticket caches
+    await invalidateTicketCaches({ orgId: user.orgId, userId: ticket.userId });
+
+    return successResponse(res, {
+      statusCode: 200,
+      message: `Ticket ${ticketId} updated successfully.`,
+      data: updatedTicket || { ...ticket, ...updates },
+    });
+  } catch (err) {
+    return errorResponse(res, {
+      statusCode: 500,
+      message: err.message || 'Failed to update ticket.',
+    });
+  }
+}

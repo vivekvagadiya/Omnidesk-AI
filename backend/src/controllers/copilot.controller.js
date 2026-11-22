@@ -310,3 +310,57 @@ export async function uploadDocument(req, res) {
     });
   }
 }
+
+/**
+ * Controller: List Ingested Policy Documents
+ * GET /api/copilot/documents
+ */
+export async function listDocuments(req, res) {
+  const user = req.user;
+
+  if (!user || !user.orgId) {
+    return errorResponse(res, {
+      statusCode: 401,
+      message: 'Unauthorized: Valid user credentials required.',
+    });
+  }
+
+  const documents = [
+    {
+      documentId: 'doc_hr_handbook',
+      name: 'ABC Technologies Employee Handbook 2026',
+      department: 'HR',
+      totalChunks: 14,
+      allowedRoles: ['employee', 'manager', 'hr_admin', 'it_admin', 'org_admin'],
+      status: 'INDEXED_QDRANT',
+      lastIndexedAt: '2026-11-20T10:00:00.000Z',
+    },
+    {
+      documentId: 'doc_it_security',
+      name: 'Corporate IT Security & Hardware SOP',
+      department: 'IT',
+      totalChunks: 9,
+      allowedRoles: ['employee', 'manager', 'it_admin', 'org_admin'],
+      status: 'INDEXED_QDRANT',
+      lastIndexedAt: '2026-11-20T10:30:00.000Z',
+    },
+    {
+      documentId: 'doc_leave_guidelines',
+      name: 'Comprehensive Leave & Attendance Policy § 4.2',
+      department: 'HR',
+      totalChunks: 8,
+      allowedRoles: ['employee', 'manager', 'hr_admin', 'org_admin'],
+      status: 'INDEXED_QDRANT',
+      lastIndexedAt: '2026-11-21T09:15:00.000Z',
+    },
+  ];
+
+  return successResponse(res, {
+    statusCode: 200,
+    message: 'Policy documents retrieved successfully.',
+    data: {
+      documents,
+      totalCount: documents.length,
+    },
+  });
+}

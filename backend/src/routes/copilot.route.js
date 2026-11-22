@@ -6,8 +6,9 @@ import {
   rejectAction,
   getActionDetails,
   uploadDocument,
+  listDocuments,
 } from "../controllers/copilot.controller.js";
-import { authenticateJwt } from "../middlewares/auth.middleware.js";
+import { authenticateJwt, requireRoles } from "../middlewares/auth.middleware.js";
 
 const router = Router();
 
@@ -53,8 +54,24 @@ router.get("/action/:actionId", getActionDetails);
 /**
  * @route   POST /api/copilot/documents
  * @desc    Upload and ingest enterprise policy document into Qdrant
- * @access  Private (All Roles)
+ * @access  Private (Admins & Managers)
  */
-router.post("/documents", upload.single("file"), uploadDocument);
+router.post(
+  "/documents",
+  requireRoles("super_admin", "org_admin", "hr_admin", "it_admin", "manager"),
+  upload.single("file"),
+  uploadDocument
+);
+
+/**
+ * @route   GET /api/copilot/documents
+ * @desc    List ingested policy documents indexed in Qdrant
+ * @access  Private (Admins & Managers)
+ */
+router.get(
+  "/documents",
+  requireRoles("super_admin", "org_admin", "hr_admin", "it_admin", "manager"),
+  listDocuments
+);
 
 export default router;

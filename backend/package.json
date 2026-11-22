@@ -25,6 +25,7 @@
     "test:sprint4:m1": "node test/test-sprint4-module1.js",
     "test:sprint4:m2": "node test/test-sprint4-module2.js",
     "test:sprint4": "node test/test-sprint4-module1.js && node test/test-sprint4-module2.js",
+    "test:sprint6": "node test/test-sprint6-role-verification.js",
     "qdrant:check": "node scripts/check-qdrant.js",
     "qdrant:init": "node scripts/check-qdrant.js --init"
   },
