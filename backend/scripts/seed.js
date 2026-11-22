@@ -12,6 +12,7 @@ import {
   isRedisReady,
 } from "../src/config/redis.js";
 import { invalidateCachePattern } from "../src/services/cache/cache.service.js";
+import { seedBaselineAuditLogs } from "../src/services/audit/audit.service.js";
 
 /** Shared password for every seeded test account */
 export const SEED_PASSWORD = "Test@123";
@@ -276,6 +277,14 @@ async function seed() {
         "⚠️ [Seeder] Qdrant policy seeding notice:",
         policyErr.message,
       );
+    }
+
+    // 7. Seed baseline cryptographic audit logs
+    try {
+      await seedBaselineAuditLogs("org_abc");
+      console.log("🔒 Cryptographic SHA-256 audit logs seeded.");
+    } catch (auditErr) {
+      console.warn("⚠️ [Seeder] Audit log seeding notice:", auditErr.message);
     }
   } catch (error) {
     console.error("❌ [Seeder] Error seeding database:", error);

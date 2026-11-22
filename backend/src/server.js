@@ -1,52 +1,68 @@
-import app from './app.js';
-import { config } from './config/environment.js';
-import { connectDB, disconnectDB } from './config/db.js';
-import { connectRedis, disconnectRedis } from './config/redis.js';
+import app from "./app.js";
+import { config } from "./config/environment.js";
+import { connectDB, disconnectDB } from "./config/db.js";
+import { connectRedis, disconnectRedis } from "./config/redis.js";
 import {
   startNotificationWorker,
   stopNotificationWorker,
-} from './services/queue/notificationWorker.js';
+} from "./services/queue/notificationWorker.js";
+import { seedBaselineAuditLogs } from "./services/audit/audit.service.js";
 
 let server;
 
 async function bootstrap() {
-  console.log('================================================================');
-  console.log('🚀 OMNIDESK AI — ENTERPRISE IT & HR OPERATIONS COPILOT BACKEND');
-  console.log('================================================================\n');
+  console.log(
+    "================================================================",
+  );
+  console.log("🚀 OMNIDESK AI — ENTERPRISE IT & HR OPERATIONS COPILOT BACKEND");
+  console.log(
+    "================================================================\n",
+  );
 
   // Initialize Database Connections
   await connectDB();
   await connectRedis();
+
+  // Seed initial cryptographic audit baseline
+  // await seedBaselineAuditLogs('org_abc');
 
   // Start background notification queue consumer
   await startNotificationWorker();
 
   server = app.listen(config.port, () => {
     console.log(`\n🌐 HTTP Server running on: http://localhost:${config.port}`);
-    console.log(`📡 Health Check Endpoint : http://localhost:${config.port}/api/health`);
-    console.log(`🔐 Authentication Endpoint: http://localhost:${config.port}/api/auth/login`);
+    console.log(
+      `📡 Health Check Endpoint : http://localhost:${config.port}/api/health`,
+    );
+    console.log(
+      `🔐 Authentication Endpoint: http://localhost:${config.port}/api/auth/login`,
+    );
     console.log(`🌍 Environment            : ${config.nodeEnv}`);
-    console.log(`================================================================\n`);
+    console.log(
+      `================================================================\n`,
+    );
   });
 }
 
 // Graceful shutdown handler
 async function handleShutdown(signal) {
-  console.log(`\n🛑 [${signal}] Received shutdown signal. Closing server and connections...`);
+  console.log(
+    `\n🛑 [${signal}] Received shutdown signal. Closing server and connections...`,
+  );
 
   if (server) {
     server.close(async () => {
-      console.log('🔒 HTTP server closed.');
+      console.log("🔒 HTTP server closed.");
       await stopNotificationWorker();
       await disconnectDB();
       await disconnectRedis();
-      console.log('👋 Goodbye!');
+      console.log("👋 Goodbye!");
       process.exit(0);
     });
 
     // Force exit if shutdown hangs beyond 10s
     setTimeout(() => {
-      console.error('⚠️  Forcefully terminating after 10s timeout.');
+      console.error("⚠️  Forcefully terminating after 10s timeout.");
       process.exit(1);
     }, 10000);
   } else {
@@ -54,10 +70,10 @@ async function handleShutdown(signal) {
   }
 }
 
-process.on('SIGINT', () => handleShutdown('SIGINT'));
-process.on('SIGTERM', () => handleShutdown('SIGTERM'));
+process.on("SIGINT", () => handleShutdown("SIGINT"));
+process.on("SIGTERM", () => handleShutdown("SIGTERM"));
 
 bootstrap().catch((err) => {
-  console.error('💥 Fatal bootstrap error:', err);
+  console.error("💥 Fatal bootstrap error:", err);
   process.exit(1);
 });

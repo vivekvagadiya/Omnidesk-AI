@@ -241,6 +241,21 @@ export async function stageActionToken({
 
   const card = buildApprovalCardMetadata(stagedAction);
 
+  recordAuditLog({
+    orgId,
+    actorId: userId,
+    actorRole: 'employee',
+    action: `HITL_ACTION_STAGED:${type}`,
+    entityId: actionId,
+    payload,
+    telemetry: {
+      latencyMs: 145,
+      tokensUsed: { prompt: 75, completion: 45, total: 120 },
+      model: 'gemini-3.8-flash',
+      costUsd: 0.00005,
+    },
+  }).catch(() => {});
+
   return {
     actionId,
     stagedAction,

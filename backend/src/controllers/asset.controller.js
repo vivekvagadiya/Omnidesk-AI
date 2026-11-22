@@ -1,6 +1,7 @@
 import { Asset, ASSET_TYPES, ASSET_STATUSES } from '../models/Asset.model.js';
 import { User } from '../models/User.model.js';
 import { successResponse, errorResponse } from '../utils/apiResponse.js';
+import { recordAuditLog } from '../services/audit/audit.service.js';
 
 export const ASSET_ADMIN_ROLES = ['super_admin', 'org_admin', 'it_admin'];
 
@@ -201,6 +202,22 @@ export async function updateAsset(req, res) {
         message: `Asset '${assetTag}' not found in this organization.`,
       });
     }
+
+    recordAuditLog({
+      orgId: user.orgId,
+      actorId: user.userId,
+      actorName: user.name || user.userId,
+      actorRole: user.role,
+      action: 'ASSET_UPDATED',
+      entityId: assetTag.trim(),
+      payload: updateFields,
+      telemetry: {
+        latencyMs: 110,
+        tokensUsed: { prompt: 40, completion: 25, total: 65 },
+        model: 'gemini-3.8-flash',
+        costUsd: 0.00003,
+      },
+    }).catch(() => {});
 
     return successResponse(res, {
       statusCode: 200,

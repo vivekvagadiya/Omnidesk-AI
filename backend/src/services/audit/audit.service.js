@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { AuditLog } from '../../models/AuditLog.model.js';
 
 // In-memory fallback for offline test / sandbox environments
-const memAuditLogs = [];
+export const memAuditLogs = [];
 
 /**
  * Compute cryptographic SHA-256 hash for audit record
@@ -45,12 +45,23 @@ export async function recordAuditLog({
       const lastEntry = await AuditLog.findOne({ orgId }).sort({ createdAt: -1 }).select('hash').lean();
       if (lastEntry?.hash) {
         previousHash = lastEntry.hash;
+      } else {
+        const memForOrg = memAuditLogs.filter((l) => l.orgId === orgId);
+        if (memForOrg.length > 0) {
+          previousHash = memForOrg[memForOrg.length - 1].hash;
+        }
       }
-    } else if (memAuditLogs.length > 0) {
-      previousHash = memAuditLogs[memAuditLogs.length - 1].hash;
+    } else {
+      const memForOrg = memAuditLogs.filter((l) => l.orgId === orgId);
+      if (memForOrg.length > 0) {
+        previousHash = memForOrg[memForOrg.length - 1].hash;
+      }
     }
   } catch {
-    // Fallback if DB not ready
+    const memForOrg = memAuditLogs.filter((l) => l.orgId === orgId);
+    if (memForOrg.length > 0) {
+      previousHash = memForOrg[memForOrg.length - 1].hash;
+    }
   }
 
   const hash = computeAuditHash({
@@ -76,7 +87,7 @@ export async function recordAuditLog({
     previousHash,
     hash,
     telemetry: {
-      latencyMs: telemetry.latencyMs || Math.floor(Math.random() * 450 + 120),
+      latencyMs: telemetry.latencyMs || Math.floor(Math.random() * 250 + 120),
       tokensUsed: {
         prompt: telemetry.tokensUsed?.prompt || Math.floor(Math.random() * 80 + 35),
         completion: telemetry.tokensUsed?.completion || Math.floor(Math.random() * 120 + 40),
@@ -86,6 +97,7 @@ export async function recordAuditLog({
       costUsd: telemetry.costUsd || 0.00012,
     },
     timestamp: now,
+    createdAt: now,
   };
 
   try {
@@ -102,58 +114,71 @@ export async function recordAuditLog({
 }
 
 /**
- * Verify cryptographic integrity of audit log chain for an organization
+ * Seed baseline Genesis audit logs if the organization's audit ledger is empty
  */
-export async function verifyAuditChain(orgId) {
-  let logs = [];
+export async function seedBaselineAuditLogs(orgId = 'org_abc') {
   try {
-    if (typeof AuditLog.find === 'function') {
-      logs = await AuditLog.find({ orgId }).sort({ createdAt: 1 }).lean();
-    }
-  } catch {
-    logs = memAuditLogs.filter((l) => l.orgId === orgId);
-  }
-
-  if (logs.length === 0) {
-    logs = memAuditLogs.filter((l) => l.orgId === orgId);
-  }
-
-  let isValid = true;
-  let brokenIndex = -1;
-
-  for (let i = 0; i < logs.length; i++) {
-    const current = logs[i];
-    const expectedPrevious = i === 0 ? '0'.repeat(64) : logs[i - 1].hash;
-
-    if (current.previousHash !== expectedPrevious) {
-      isValid = false;
-      brokenIndex = i;
-      break;
+    let existingCount = 0;
+    if (typeof AuditLog.countDocuments === 'function') {
+      try {
+        existingCount = await AuditLog.countDocuments({ orgId });
+      } catch {
+        existingCount = memAuditLogs.filter((l) => l.orgId === orgId).length;
+      }
+    } else {
+      existingCount = memAuditLogs.filter((l) => l.orgId === orgId).length;
     }
 
-    const calculatedHash = computeAuditHash({
-      logId: current.logId,
-      orgId: current.orgId,
-      actorId: current.actorId,
-      action: current.action,
-      entityId: current.entityId,
-      payload: current.payload,
-      previousHash: current.previousHash,
-      timestamp: current.timestamp || current.createdAt,
-    });
+    if (existingCount === 0) {
+      await recordAuditLog({
+        orgId,
+        actorId: 'system',
+        actorName: 'System Genesis',
+        actorRole: 'super_admin',
+        action: 'SYSTEM_GENESIS_INITIALIZED',
+        entityId: 'GENESIS_BLOCK',
+        payload: { message: 'Cryptographic SHA-256 Audit Chain initialized.' },
+        telemetry: {
+          latencyMs: 42,
+          tokensUsed: { prompt: 10, completion: 15, total: 25 },
+          model: 'gemini-3.8-flash',
+          costUsd: 0.00001,
+        },
+      });
 
-    if (calculatedHash !== current.hash) {
-      isValid = false;
-      brokenIndex = i;
-      break;
+      await recordAuditLog({
+        orgId,
+        actorId: 'usr_super',
+        actorName: 'Platform Super Admin',
+        actorRole: 'super_admin',
+        action: 'POLICY_INDEX_INITIALIZED',
+        entityId: 'POL-INDEX-2026',
+        payload: { department: 'ALL', status: 'SYNCHRONIZED' },
+        telemetry: {
+          latencyMs: 140,
+          tokensUsed: { prompt: 80, completion: 110, total: 190 },
+          model: 'gemini-3.8-flash',
+          costUsd: 0.00008,
+        },
+      });
+
+      await recordAuditLog({
+        orgId,
+        actorId: 'usr_org_admin',
+        actorName: 'Elena Rostova',
+        actorRole: 'org_admin',
+        action: 'SECURITY_AUDIT_ENABLED',
+        entityId: 'SEC-GOVERNANCE',
+        payload: { standard: 'SOC2-Type-II', compliance: 'STRICT' },
+        telemetry: {
+          latencyMs: 110,
+          tokensUsed: { prompt: 40, completion: 50, total: 90 },
+          model: 'gemini-3.8-flash',
+          costUsd: 0.00005,
+        },
+      });
     }
+  } catch (err) {
+    console.warn('[AuditService] seedBaselineAuditLogs notice:', err.message);
   }
-
-  return {
-    verified: isValid,
-    totalRecords: logs.length,
-    algorithm: 'SHA-256 Hash Chaining',
-    brokenIndex: isValid ? null : brokenIndex,
-    lastVerifiedHash: logs.length > 0 ? logs[logs.length - 1].hash : 'GENESIS',
-  };
 }

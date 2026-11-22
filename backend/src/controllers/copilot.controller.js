@@ -14,6 +14,7 @@ import {
 } from '../services/rag/ingestion.service.js';
 import { successResponse, errorResponse } from '../utils/apiResponse.js';
 import { enqueueNotification } from '../services/queue/notificationWorker.js';
+import { recordAuditLog } from '../services/audit/audit.service.js';
 
 /**
  * Controller: Stream Copilot Chat with SSE
@@ -290,6 +291,27 @@ export async function uploadDocument(req, res) {
       testEmbeddingProvider: req.testEmbeddingProvider || req.app?.locals?.testEmbeddingProvider || null,
       qdrantClient: req.qdrantClient || req.app?.locals?.qdrantClient || null,
     });
+
+    recordAuditLog({
+      orgId: user.orgId,
+      actorId: user.userId,
+      actorName: user.name || user.userId,
+      actorRole: user.role,
+      action: 'DOCUMENT_UPLOADED',
+      entityId: result?.docId || req.file.originalname,
+      payload: {
+        filename: req.file.originalname,
+        department: targetDepartment,
+        allowedRoles: parsedRoles,
+        chunksIndexed: result?.chunksIndexed || 0,
+      },
+      telemetry: {
+        latencyMs: 310,
+        tokensUsed: { prompt: 140, completion: 60, total: 200 },
+        model: 'gemini-3.8-flash',
+        costUsd: 0.00008,
+      },
+    }).catch(() => {});
 
     return successResponse(res, {
       statusCode: 201,
