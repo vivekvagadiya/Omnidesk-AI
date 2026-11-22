@@ -19,7 +19,7 @@ export async function getAuditLogs(req, res, next) {
     const { action, actorId, page, limit } = req.query;
 
     const data = await auditService.getAuditLogsService({
-      orgId: user.orgId,
+      user,
       action,
       actorId,
       page,
