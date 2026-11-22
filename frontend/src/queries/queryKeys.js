@@ -34,7 +34,6 @@ export const queryKeys = {
   audit: {
     all: ['audit'],
     list: (filters) => ['audit', 'list', filters],
-    verify: () => ['audit', 'verify'],
   },
   documents: {
     all: ['documents'],

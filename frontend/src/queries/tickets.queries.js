@@ -46,6 +46,7 @@ export function useCreateTicketMutation() {
       return Promise.all([
         queryClient.invalidateQueries({ queryKey: queryKeys.tickets.all }),
         queryClient.invalidateQueries({ queryKey: queryKeys.notifications.all }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.audit.all }),
       ]);
     },
     // No errorTitle: the create-ticket form shows the error inline

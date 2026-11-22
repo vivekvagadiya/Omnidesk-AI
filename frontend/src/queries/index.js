@@ -8,7 +8,7 @@ export {
   TICKET_SCOPE_ROLES,
 } from './tickets.queries';
 export { useAssetsQuery, useUpdateAssetMutation } from './assets.queries';
-export { useAuditLogsQuery, useAuditVerificationQuery } from './audit.queries';
+export { useAuditLogsQuery } from './audit.queries';
 export {
   useUnreadCountQuery,
   useNotificationsQuery,

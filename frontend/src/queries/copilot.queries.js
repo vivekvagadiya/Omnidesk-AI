@@ -8,9 +8,9 @@ import { queryKeys } from './queryKeys';
  * HITL approvals so the side panels refresh without a manual reload.
  */
 const TOOL_INVALIDATIONS = {
-  createTicket: [queryKeys.tickets.all, queryKeys.notifications.all],
-  applyLeave: [queryKeys.profile.all, queryKeys.tickets.all],
-  requestHardwareUpgrade: [queryKeys.tickets.all],
+  createTicket: [queryKeys.tickets.all, queryKeys.notifications.all, queryKeys.audit.all],
+  applyLeave: [queryKeys.profile.all, queryKeys.tickets.all, queryKeys.audit.all],
+  requestHardwareUpgrade: [queryKeys.tickets.all, queryKeys.audit.all],
 };
 
 /**
@@ -45,14 +45,21 @@ export function useApproveActionMutation() {
         queryClient.invalidateQueries({ queryKey: queryKeys.profile.all }),
         queryClient.invalidateQueries({ queryKey: queryKeys.tickets.all }),
         queryClient.invalidateQueries({ queryKey: queryKeys.notifications.all }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.audit.all }),
       ]),
     meta: { errorTitle: 'Approval Failed' },
   });
 }
 
 export function useRejectActionMutation() {
+  const queryClient = useQueryClient();
+
   return useMutation({
     mutationFn: (actionId) => copilotService.rejectAction(actionId),
+    onSuccess: () =>
+      Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.audit.all }),
+      ]),
     meta: { errorTitle: 'Rejection Failed' },
   });
 }
@@ -62,7 +69,11 @@ export function useUploadDocumentMutation() {
 
   return useMutation({
     mutationFn: ({ file, department, allowedRoles }) => copilotService.uploadDocument(file, department, allowedRoles),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.documents.all }),
+    onSuccess: () =>
+      Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.documents.all }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.audit.all }),
+      ]),
     // No errorTitle: the upload panel reports progress and errors itself
   });
 }

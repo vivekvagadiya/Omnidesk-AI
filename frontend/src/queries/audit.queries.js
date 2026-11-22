@@ -14,18 +14,7 @@ export function useAuditLogsQuery({ action, actorId, limit = 50, enabled = true 
     queryFn: ({ signal }) => auditService.getAuditLogs(filters, { signal }),
     enabled: Boolean(user?.userId) && enabled,
     placeholderData: keepPreviousData,
+    refetchInterval: enabled ? 4000 : false,
     meta: { errorTitle: 'Could not fetch audit logs' },
-  });
-}
-
-export function useAuditVerificationQuery({ enabled = true } = {}) {
-  const { user } = useAuth();
-
-  return useQuery({
-    queryKey: queryKeys.audit.verify(),
-    queryFn: ({ signal }) => auditService.verifyChain({ signal }),
-    enabled: Boolean(user?.userId) && enabled,
-    staleTime: 30_000,
-    meta: { errorTitle: 'Audit Verification Failed' },
   });
 }
