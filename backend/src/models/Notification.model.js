@@ -14,8 +14,8 @@ const NINETY_DAYS_SECONDS = 90 * 24 * 3600;
 const notificationSchema = new mongoose.Schema(
   {
     notificationId: { type: String, required: true, unique: true, trim: true },
-    orgId: { type: String, required: true, trim: true },
-    userId: { type: String, required: true, trim: true }, // recipient
+    orgId: { type: String, required: true, trim: true, index: true },
+    userId: { type: String, required: true, trim: true, index: true }, // recipient
     type: { type: String, enum: NOTIFICATION_TYPES, required: true },
     title: { type: String, required: true, trim: true, maxlength: 200 },
     body: { type: String, default: '', trim: true, maxlength: 1000 },
@@ -26,8 +26,8 @@ const notificationSchema = new mongoose.Schema(
     },
     actorId: { type: String, default: null }, // who caused it
     readAt: { type: Date, default: null },
-    // event + entity + recipient: makes notify() idempotent if it is ever retried
-    dedupeKey: { type: String, required: true, unique: true },
+    // Deduplication identity: scoped per tenant in compound index below
+    dedupeKey: { type: String, required: true, trim: true },
   },
   { timestamps: { createdAt: true, updatedAt: false } }
 );
@@ -35,7 +35,11 @@ const notificationSchema = new mongoose.Schema(
 // Bell list (newest first, cursor on createdAt + _id) and unread count
 notificationSchema.index({ orgId: 1, userId: 1, createdAt: -1, _id: -1 });
 notificationSchema.index({ orgId: 1, userId: 1, readAt: 1 });
-// Auto-delete after 90 days
+
+// Tenant-isolated deduplication index (avoids accidental cross-tenant collisions)
+notificationSchema.index({ orgId: 1, dedupeKey: 1 }, { unique: true });
+
+// Auto-delete after 90 days (TTL)
 notificationSchema.index({ createdAt: 1 }, { expireAfterSeconds: NINETY_DAYS_SECONDS });
 
 export const Notification = mongoose.model('Notification', notificationSchema);

@@ -2,10 +2,6 @@ import app from "./app.js";
 import { config } from "./config/environment.js";
 import { connectDB, disconnectDB } from "./config/db.js";
 import { connectRedis, disconnectRedis } from "./config/redis.js";
-import {
-  startNotificationWorker,
-  stopNotificationWorker,
-} from "./services/queue/notificationWorker.js";
 import { seedBaselineAuditLogs } from "./services/audit/audit.service.js";
 
 let server;
@@ -25,9 +21,6 @@ async function bootstrap() {
 
   // Seed initial cryptographic audit baseline
   // await seedBaselineAuditLogs('org_abc');
-
-  // Start background notification queue consumer
-  await startNotificationWorker();
 
   server = app.listen(config.port, () => {
     console.log(`\n🌐 HTTP Server running on: http://localhost:${config.port}`);
@@ -53,7 +46,6 @@ async function handleShutdown(signal) {
   if (server) {
     server.close(async () => {
       console.log("🔒 HTTP server closed.");
-      await stopNotificationWorker();
       await disconnectDB();
       await disconnectRedis();
       console.log("👋 Goodbye!");

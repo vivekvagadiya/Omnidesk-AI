@@ -7,7 +7,6 @@ import {
 } from '../models/Ticket.model.js';
 import { User } from '../models/User.model.js';
 import { invalidateTicketCaches } from './cache/cache.service.js';
-import { enqueueNotification } from './queue/notificationWorker.js';
 import { notify } from './notifications/notification.service.js';
 import { recordAuditLog } from './audit/audit.service.js';
 
@@ -177,17 +176,6 @@ export async function createTicketService({ user, ticketData }) {
       category: normalizedCategory,
       priority: normalizedPriority,
     },
-  });
-
-  await enqueueNotification({
-    event: 'TICKET_CREATED',
-    ticketId,
-    userId: user.userId,
-    orgId: user.orgId,
-    title: title.trim(),
-    category: normalizedCategory,
-    priority: normalizedPriority,
-    createdAt: new Date().toISOString(),
   });
 
   recordAuditLog({

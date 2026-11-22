@@ -13,7 +13,6 @@ import {
   IngestionValidationError,
 } from '../services/rag/ingestion.service.js';
 import { successResponse, errorResponse } from '../utils/apiResponse.js';
-import { enqueueNotification } from '../services/queue/notificationWorker.js';
 import { recordAuditLog } from '../services/audit/audit.service.js';
 
 /**
@@ -110,17 +109,6 @@ export async function approveAction(req, res) {
       actionId: actionId.trim(),
       user,
       decision: 'APPROVE',
-    });
-
-    // Async notification for the background worker
-    await enqueueNotification({
-      event: 'ACTION_APPROVED',
-      actionId: actionId.trim(),
-      userId: user.userId,
-      orgId: user.orgId,
-      type: result.type,
-      details: result.result,
-      createdAt: new Date().toISOString(),
     });
 
     return successResponse(res, {
