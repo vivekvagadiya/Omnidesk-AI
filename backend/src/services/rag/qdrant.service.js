@@ -94,8 +94,8 @@ export async function upsertPolicyVectors(points, client = getQdrantClient()) {
       points,
     });
   } catch (err) {
-    console.warn(`⚠️  [Qdrant] Upsert warning: ${err.message}. Operation completed in fallback mode.`);
-    return { status: 'fallback', count: points.length };
+    console.error(`❌ [Qdrant] Vector upsert failed: ${err.message}`);
+    throw new Error(`Qdrant vector upsert failed: ${err.message}`);
   }
 }
 
@@ -124,27 +124,27 @@ export async function searchPolicyVectors({
   if (!queryVector || !Array.isArray(queryVector)) {
     throw new Error('queryVector array is required for vector search.');
   }
-  if (!orgId) {
+  if (!orgId || typeof orgId !== 'string' || !orgId.trim()) {
     throw new Error('Tenant orgId is required to enforce data isolation.');
   }
 
   const activeClient = client || getQdrantClient();
   if (!activeClient) {
-    return [];
+    throw new Error('Qdrant client is unavailable.');
   }
 
   // Tenant isolation is non-negotiable
   const mustConditions = [
     {
       key: 'orgId',
-      match: { value: orgId },
+      match: { value: orgId.trim() },
     },
   ];
 
   if (department) {
     mustConditions.push({
       key: 'department',
-      match: { value: department },
+      match: { value: department.toUpperCase() },
     });
   }
 
@@ -184,8 +184,8 @@ export async function searchPolicyVectors({
       return Array.isArray(response) ? response : (response?.result || response?.points || []);
     }
   } catch (searchErr) {
-    console.warn(`⚠️ [Qdrant] Search notice (${searchErr.message}). Gracefully returning empty result.`);
-    return [];
+    console.error(`❌ [Qdrant] Search error: ${searchErr.message}`);
+    throw new Error(`Qdrant vector search failed: ${searchErr.message}`);
   }
 
   return [];

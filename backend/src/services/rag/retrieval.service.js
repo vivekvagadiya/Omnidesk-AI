@@ -5,7 +5,7 @@ import {
 } from './ingestion.service.js';
 import { searchOfflinePolicies } from './seedPolicies.data.js';
 
-export const SIMILARITY_THRESHOLD = 0.65;
+export const SIMILARITY_THRESHOLD = Number(process.env.RAG_SCORE_THRESHOLD) || 0.65;
 export const DEFAULT_SEARCH_LIMIT = 5;
 
 export const ZERO_HALLUCINATION_FALLBACK = {
@@ -67,7 +67,7 @@ export function formatContextBlock(chunks) {
 
 /**
  * Tenant-Isolated Semantic Policy Search with Zero-Hallucination Guardrail
- * Searches Qdrant vector database, falling back gracefully to offline policy knowledge if Qdrant is empty or offline.
+ * Searches Qdrant vector database with strict multi-tenant scoping and zero-hallucination cutoff.
  *
  * @param {Object} params
  * @param {string} params.query User query text
@@ -79,6 +79,7 @@ export function formatContextBlock(chunks) {
  * @param {number} [params.scoreThreshold=0.65] Zero-hallucination cutoff score
  * @param {Function} [params.embeddingProvider] Custom embedding provider for tests
  * @param {Object} [params.qdrantClient] Custom Qdrant client
+ * @param {boolean} [params.allowOfflineFallback=false] Explicit opt-in for offline mock fallback
  * @returns {Promise<Object>} Retrieval result with isGrounded status and chunks
  */
 export async function retrievePolicyContext({
@@ -91,13 +92,17 @@ export async function retrievePolicyContext({
   scoreThreshold = SIMILARITY_THRESHOLD,
   embeddingProvider = null,
   qdrantClient = null,
+  allowOfflineFallback = false,
 }) {
   if (!query || typeof query !== 'string' || query.trim().length === 0) {
     throw new RetrievalError('Search query text is required.');
   }
 
   // 1. Enforce Multi-Tenant Isolation
-  const tenantOrgId = orgId || user?.orgId || 'org_abc';
+  const tenantOrgId = orgId || user?.orgId;
+  if (!tenantOrgId || typeof tenantOrgId !== 'string' || !tenantOrgId.trim()) {
+    throw new RetrievalError('Tenant isolation breach: orgId is strictly required.', 400);
+  }
 
   // Enforce User Role for RBAC if available
   const userRole = role || user?.role || null;
@@ -105,20 +110,27 @@ export async function retrievePolicyContext({
 
   // 2. Generate 768-dim Query Embedding Vector
   let queryVector = null;
-  try {
-    if (typeof embeddingProvider === 'function') {
-      queryVector = await embeddingProvider(query);
-    } else {
+  if (typeof embeddingProvider === 'function') {
+    queryVector = await embeddingProvider(query);
+  } else {
+    try {
       const [vector] = await generateEmbeddings([query]);
       queryVector = vector;
+    } catch (embErr) {
+      if (process.env.NODE_ENV === 'test') {
+        queryVector = generateTestEmbedding(query);
+      } else {
+        throw new RetrievalError(`Failed to generate query embedding: ${embErr.message}`, 502);
+      }
     }
-  } catch (embErr) {
-    console.warn(`⚠️ [Retrieval] Embedding generation notice (${embErr.message}). Using test vector.`);
-    queryVector = generateTestEmbedding(query);
   }
 
   if (!queryVector || queryVector.length !== 768) {
-    queryVector = generateTestEmbedding(query);
+    if (process.env.NODE_ENV === 'test') {
+      queryVector = generateTestEmbedding(query);
+    } else {
+      throw new RetrievalError('Invalid query embedding dimension generated.', 500);
+    }
   }
 
   // 3. Search Qdrant with Strict Tenant & Department Isolation
@@ -126,7 +138,7 @@ export async function retrievePolicyContext({
   try {
     rawResults = await searchPolicyVectors({
       queryVector,
-      orgId: tenantOrgId,
+      orgId: tenantOrgId.trim(),
       department: targetDepartment,
       role: userRole,
       limit,
@@ -134,44 +146,39 @@ export async function retrievePolicyContext({
       client: qdrantClient || null,
     });
   } catch (err) {
-    console.warn(`⚠️ [Retrieval] Qdrant search encountered notice: ${err.message}`);
-    rawResults = [];
-  }
-
-  // 4. In-Memory Resilient Fallback if Qdrant has zero indexed points or is unreachable
-  if (!Array.isArray(rawResults) || rawResults.length === 0) {
-    const offlineMatches = searchOfflinePolicies({
-      query,
-      orgId: tenantOrgId,
-      department: targetDepartment,
-      role: userRole,
-      limit,
-    });
-
-    if (offlineMatches.length > 0) {
-      const highestScore = offlineMatches[0].score;
-      const contextBlock = formatContextBlock(offlineMatches);
-      return {
-        isGrounded: true,
-        hasResults: true,
-        highestScore,
-        totalChunksFound: offlineMatches.length,
-        query: query.trim(),
-        orgId: tenantOrgId,
-        chunks: offlineMatches,
-        contextBlock,
-      };
+    console.error(`❌ [Retrieval] Qdrant search encountered error: ${err.message}`);
+    if (allowOfflineFallback) {
+      const offlineMatches = searchOfflinePolicies({
+        query,
+        orgId: tenantOrgId.trim(),
+        department: targetDepartment,
+        role: userRole,
+        limit,
+      });
+      if (offlineMatches.length > 0) {
+        return {
+          isGrounded: true,
+          hasResults: true,
+          highestScore: offlineMatches[0].score,
+          totalChunksFound: offlineMatches.length,
+          query: query.trim(),
+          orgId: tenantOrgId.trim(),
+          chunks: offlineMatches,
+          contextBlock: formatContextBlock(offlineMatches),
+        };
+      }
     }
 
     return {
       ...ZERO_HALLUCINATION_FALLBACK,
       query: query.trim(),
-      orgId: tenantOrgId,
+      orgId: tenantOrgId.trim(),
+      error: `Policy search service failure: ${err.message}`,
     };
   }
 
-  // 5. Clean, Rank, and Format Matched Evidence Chunks
-  const normalizedChunks = rawResults
+  // 4. Clean, Rank, and Format Matched Evidence Chunks
+  const normalizedChunks = (Array.isArray(rawResults) ? rawResults : [])
     .filter((point) => point && typeof point === 'object')
     .map((point) => {
       const payload = point.payload || {};
@@ -187,41 +194,41 @@ export async function retrievePolicyContext({
         text: payload.text || '',
         department: payload.department || 'General',
         allowedRoles: payload.allowedRoles || [],
-        orgId: payload.orgId || tenantOrgId,
+        orgId: payload.orgId || tenantOrgId.trim(),
       };
     })
     .filter((c) => c.text && c.score >= scoreThreshold)
     .sort((a, b) => b.score - a.score);
 
-  // If all chunks filtered below threshold, check offline store before declaring ungrounded
+  // If no chunks found or all filtered below threshold
   if (normalizedChunks.length === 0) {
-    const offlineMatches = searchOfflinePolicies({
-      query,
-      orgId: tenantOrgId,
-      department: targetDepartment,
-      role: userRole,
-      limit,
-    });
+    if (allowOfflineFallback) {
+      const offlineMatches = searchOfflinePolicies({
+        query,
+        orgId: tenantOrgId.trim(),
+        department: targetDepartment,
+        role: userRole,
+        limit,
+      });
 
-    if (offlineMatches.length > 0) {
-      const highestScore = offlineMatches[0].score;
-      const contextBlock = formatContextBlock(offlineMatches);
-      return {
-        isGrounded: true,
-        hasResults: true,
-        highestScore,
-        totalChunksFound: offlineMatches.length,
-        query: query.trim(),
-        orgId: tenantOrgId,
-        chunks: offlineMatches,
-        contextBlock,
-      };
+      if (offlineMatches.length > 0) {
+        return {
+          isGrounded: true,
+          hasResults: true,
+          highestScore: offlineMatches[0].score,
+          totalChunksFound: offlineMatches.length,
+          query: query.trim(),
+          orgId: tenantOrgId.trim(),
+          chunks: offlineMatches,
+          contextBlock: formatContextBlock(offlineMatches),
+        };
+      }
     }
 
     return {
       ...ZERO_HALLUCINATION_FALLBACK,
       query: query.trim(),
-      orgId: tenantOrgId,
+      orgId: tenantOrgId.trim(),
     };
   }
 
@@ -234,7 +241,7 @@ export async function retrievePolicyContext({
     highestScore,
     totalChunksFound: normalizedChunks.length,
     query: query.trim(),
-    orgId: tenantOrgId,
+    orgId: tenantOrgId.trim(),
     chunks: normalizedChunks,
     contextBlock,
   };

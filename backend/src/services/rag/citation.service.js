@@ -37,7 +37,7 @@ export function buildCitationPayload(chunks) {
   }
 
   return chunks
-    .filter((chunk) => chunk && typeof chunk === 'object')
+    .filter((chunk) => chunk && typeof chunk === 'object' && chunk.text)
     .map((chunk, index) => {
       const citationIndex = index + 1;
       const docName = chunk.documentName || 'Policy Document';
@@ -85,7 +85,7 @@ export function extractReferencedCitations(text, allCitations) {
 
   for (const citation of allCitations) {
     // Check for numerical badge [1], [2] or full label [Doc § Section]
-    const badgeRegex = new RegExp(`\\[${citation.index}\\]`, 'g');
+    const badgeRegex = new RegExp(`\\[${citation.index}\\]`);
     const labelSubstr = citation.label ? text.includes(citation.label) : false;
 
     if (badgeRegex.test(text) || labelSubstr) {

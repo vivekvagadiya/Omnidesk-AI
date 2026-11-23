@@ -1,6 +1,8 @@
 /**
  * Seed Policies & Offline Knowledge Base for ABC Technologies Inc. (org_abc)
- * Provides pre-structured verified chunks used by Qdrant seeder and as a resilient offline fallback.
+ *
+ * NOTE: This file is strictly for offline testing, local mock demos, and seeding scripts.
+ * Production semantic search relies solely on Qdrant as the source of truth.
  */
 
 export const DEFAULT_ORG_ID = 'org_abc';
@@ -133,8 +135,8 @@ export function searchOfflinePolicies({
   const scored = [];
 
   for (const chunk of SEEDED_POLICY_CHUNKS) {
-    // Tenant check
-    if (orgId && chunk.orgId !== orgId && chunk.orgId !== 'org_abc') {
+    // Strict tenant check
+    if (orgId && chunk.orgId !== orgId) {
       continue;
     }
 

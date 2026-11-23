@@ -168,12 +168,14 @@ export async function extractTextFromDocument(buffer, fileType) {
 
 /**
  * Sliding-Window Chunking with Heading Context Retention
- * Splits document into ~500 token segments with ~50 token overlap
+ * Splits document into approximate ~500 token segments with ~50 token overlap.
+ * Uses a heuristic word-based estimation (~0.75 words per token / ~1.33 tokens per word)
+ * rather than an exact tokenizer runtime to avoid heavy native tokenization dependencies.
  *
  * @param {string} text Full extracted document text
  * @param {Object} [options]
- * @param {number} [options.targetTokens=500] Target token size per chunk
- * @param {number} [options.overlapTokens=50] Overlap token count
+ * @param {number} [options.targetTokens=500] Heuristic target token estimate per chunk
+ * @param {number} [options.overlapTokens=50] Heuristic overlap token estimate
  * @returns {Array<{ chunkIndex: number, text: string, sectionTitle: string, tokenCount: number }>}
  */
 export function chunkText(
@@ -217,11 +219,12 @@ export function chunkText(
   let globalChunkIndex = 0;
 
   for (const sec of sections) {
-    // Split section content into words (~0.75 tokens per word)
+    // Heuristic word-based token approximation:
+    // Standard English text averages ~0.75 words per token (or ~1.33 tokens per word).
     const words = sec.content.split(/\s+/).filter(Boolean);
     if (words.length === 0) continue;
 
-    // Approximate: 500 tokens ≈ 375 words, 50 tokens overlap ≈ 38 words
+    // Approximate words: 500 tokens ≈ 375 words, 50 tokens overlap ≈ 38 words
     const targetWords = Math.round(targetTokens * 0.75);
     const overlapWords = Math.round(overlapTokens * 0.75);
     const stepWords = Math.max(1, targetWords - overlapWords);
@@ -230,6 +233,7 @@ export function chunkText(
     while (start < words.length) {
       const chunkWords = words.slice(start, start + targetWords);
       const chunkContent = chunkWords.join(' ');
+      // Heuristic token count estimation
       const estimatedTokens = Math.round(chunkWords.length / 0.75);
 
       chunks.push({
@@ -281,9 +285,12 @@ export async function generateEmbeddings(texts, { batchSize = 10, embeddingProvi
     return Promise.all(texts.map((t) => embeddingProvider(t)));
   }
 
-  if (!config.gemini.apiKey) {
-    console.warn('⚠️  [Embeddings] No Gemini API key configured. Using offline test embedding generator.');
-    return texts.map((t) => generateTestEmbedding(t));
+  if (!config.gemini?.apiKey) {
+    if (process.env.NODE_ENV === 'test') {
+      console.warn('⚠️  [Embeddings] No Gemini API key in test environment. Using test embedding generator.');
+      return texts.map((t) => generateTestEmbedding(t));
+    }
+    throw new Error('Gemini API key is required for semantic embedding generation in production.');
   }
 
   const ai = new GoogleGenAI({ apiKey: config.gemini.apiKey });
@@ -317,14 +324,22 @@ export async function generateEmbeddings(texts, { batchSize = 10, embeddingProvi
 
     return allVectors;
   } catch (apiErr) {
-    console.warn(`⚠️  [Embeddings] API call failed: ${apiErr.message}. Falling back to test embedding generator.`);
-    return texts.map((t) => generateTestEmbedding(t));
+    if (process.env.NODE_ENV === 'test') {
+      console.warn(`⚠️  [Embeddings] API call failed in test environment: ${apiErr.message}. Using test embedding generator.`);
+      return texts.map((t) => generateTestEmbedding(t));
+    }
+    console.error(`❌ [Embeddings] Gemini embedding API failure: ${apiErr.message}`);
+    throw new Error(`Gemini embedding generation failed: ${apiErr.message}`);
   }
 }
 
 /**
- * Deterministic hash-based 768-dim embedding generator for testing
- * Produces unit-length 768-dim vectors without consuming API quotas
+ * Test-Only: Deterministic hash-based 768-dim pseudo-embedding generator.
+ * Produces unit-length 768-dim vectors strictly for offline unit tests and mocking.
+ * WARNING: This has no semantic understanding. Never use as a production embedding fallback.
+ *
+ * @param {string} text Text to hash
+ * @returns {number[]} 768-dim normalized unit vector
  */
 export function generateTestEmbedding(text) {
   const hash = crypto.createHash('sha256').update(text).digest();
@@ -365,11 +380,11 @@ export async function ingestDocument({
   testEmbeddingProvider = null,
   qdrantClient = null,
 }) {
-  if (!orgId) {
+  if (!orgId || typeof orgId !== 'string' || !orgId.trim()) {
     throw new IngestionValidationError('Tenant orgId is required to enforce data isolation.');
   }
 
-  if (!department) {
+  if (!department || typeof department !== 'string' || !department.trim()) {
     throw new IngestionValidationError('Department is required for policy categorization.');
   }
 
