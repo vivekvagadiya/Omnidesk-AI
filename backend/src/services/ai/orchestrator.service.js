@@ -4,11 +4,7 @@ import { getRedisClient } from '../../config/redis.js';
 import { retrievePolicyContext } from '../rag/retrieval.service.js';
 import { packageResponseWithCitations } from '../rag/citation.service.js';
 import { maskPII, unmaskPII } from './piiMasker.service.js';
-import {
-  executeTool,
-  TOOL_DEFINITIONS,
-  CONSEQUENTIAL_TOOLS,
-} from '../tools/toolRegistry.service.js';
+import { executeTool } from '../tools/toolRegistry.service.js';
 import { recordAuditLog } from '../audit/audit.service.js';
 
 export const PRIMARY_MODEL = 'gemini-2.5-flash';
@@ -16,13 +12,12 @@ export const FALLBACK_MODEL = 'gemini-2.0-flash';
 
 export const SESSION_TTL_SECONDS = 86400; // 24-hour session TTL
 export const MAX_SESSION_MESSAGES = 20; // Last 10 turns (user + assistant)
+const REQUEST_TIMEOUT_MS = 25000; // 25 seconds timeout for LLM generation
 
-// In-memory fallback session store for offline or disconnected Redis states
+// In-memory fallback session store for offline/non-production environments
 const inMemorySessionStore = new Map();
 
-/**
- * Clean up expired in-memory sessions every 10 minutes
- */
+// Periodic cleanup of in-memory fallback sessions
 const sessionCleanupTimer = setInterval(() => {
   const now = Date.now();
   for (const [key, session] of inMemorySessionStore.entries()) {
@@ -37,7 +32,7 @@ if (sessionCleanupTimer.unref) {
 }
 
 /**
- * Retrieve sliding-window conversation turns from Redis (or in-memory fallback)
+ * Retrieve sliding-window conversation turns from Redis (or in-memory non-prod fallback)
  *
  * @param {string} sessionId
  * @param {Object} [client]
@@ -48,17 +43,22 @@ export async function getSessionHistory(sessionId, client = getRedisClient()) {
 
   const key = `session:${sessionId}:messages`;
 
-  // 1. Try Redis first
   if (client && client.isOpen) {
     try {
       const rawTurns = await client.lRange(key, -MAX_SESSION_MESSAGES, -1);
       return rawTurns.map((turnStr) => JSON.parse(turnStr));
     } catch (err) {
-      console.warn(`⚠️ [Orchestrator] Redis session read error: ${err.message}. Using memory store.`);
+      if (config.nodeEnv === 'production') {
+        console.error(`🚨 [Orchestrator] Redis session read failed in production (${sessionId}): ${err.message}`);
+      } else {
+        console.warn(`⚠️ [Orchestrator] Redis session read error: ${err.message}. Using memory store.`);
+      }
     }
+  } else if (config.nodeEnv === 'production') {
+    console.error(`🚨 [Orchestrator] Redis unavailable in production for session read (${sessionId}).`);
   }
 
-  // 2. In-memory fallback
+  // Non-production fallback (offline sandbox / unit tests)
   const record = inMemorySessionStore.get(key);
   if (!record || record.expiresAt <= Date.now()) {
     return [];
@@ -82,7 +82,6 @@ export async function appendSessionMessage(sessionId, message, client = getRedis
     timestamp: message.timestamp || new Date().toISOString(),
   };
 
-  // 1. Try Redis
   if (client && client.isOpen) {
     try {
       await client.rPush(key, JSON.stringify(enrichedMessage));
@@ -90,11 +89,17 @@ export async function appendSessionMessage(sessionId, message, client = getRedis
       await client.expire(key, SESSION_TTL_SECONDS);
       return;
     } catch (err) {
-      console.warn(`⚠️ [Orchestrator] Redis session write error: ${err.message}. Saving to memory store.`);
+      if (config.nodeEnv === 'production') {
+        console.error(`🚨 [Orchestrator] Redis session write failed in production (${sessionId}): ${err.message}`);
+      } else {
+        console.warn(`⚠️ [Orchestrator] Redis session write error: ${err.message}. Saving to memory store.`);
+      }
     }
+  } else if (config.nodeEnv === 'production') {
+    console.error(`🚨 [Orchestrator] Redis unavailable in production for session write (${sessionId}).`);
   }
 
-  // 2. In-memory fallback
+  // Non-production fallback
   let record = inMemorySessionStore.get(key);
   if (!record || record.expiresAt <= Date.now()) {
     record = {
@@ -147,7 +152,7 @@ export function buildSystemInstructions({ user, evidenceContext = '' }) {
 
   const roleRules = {
     employee:
-      '- Role Privileges: Self-service operations only. You can view your own leave balance, active tickets, apply for leaves, and request hardware refreshes.\n- Role Boundaries: You CANNOT approve leave requests or inspect other employees\' sensitive records.',
+      "- Role Privileges: Self-service operations only. You can view your own leave balance, active tickets, apply for leaves, and request hardware refreshes.\n- Role Boundaries: You CANNOT approve leave requests or inspect other employees' sensitive records.",
     manager:
       '- Role Privileges: Team management. You supervise your direct reports, can inspect team leave requests, and approve/reject team actions.\n- Role Boundaries: You cannot alter global organization configuration.',
     hr_admin:
@@ -187,151 +192,168 @@ export function buildSystemInstructions({ user, evidenceContext = '' }) {
 }
 
 /**
- * Execute an End-to-End Copilot Conversation Turn
+ * Format multi-turn conversation history into Gemini API contents structure
  *
- * @param {Object} params
- * @param {string} params.sessionId Unique chat session ID
- * @param {string} params.message Current user message
- * @param {Object} params.user Authenticated employee user object
- * @param {Function} [params.customLlmProvider] Optional mock LLM for testing
- * @param {Function} [params.customEmbeddingProvider] Optional custom embedding provider
- * @param {Object} [params.qdrantClient] Optional custom Qdrant client
- * @returns {Promise<Object>} Formatted response with citations and session metadata
+ * @param {Array<{ role: string, text: string }>} historyTurns
+ * @param {string} currentMessage Masked user query
+ * @returns {Array<{ role: string, parts: Array<{ text: string }> }>}
  */
-export async function runCopilotTurn({
-  sessionId,
-  message,
-  user,
-  customLlmProvider = null,
-  customEmbeddingProvider = null,
-  qdrantClient = null,
-}) {
-  if (!sessionId) {
-    throw new Error('sessionId is required for copilot conversation.');
-  }
+export function formatGeminiContents(historyTurns = [], currentMessage = '') {
+  const contents = (historyTurns || []).map((turn) => ({
+    role: turn.role === 'model' || turn.role === 'assistant' ? 'model' : 'user',
+    parts: [{ text: turn.text || '' }],
+  }));
 
-  if (!message || typeof message !== 'string' || message.trim().length === 0) {
-    throw new Error('User message is required.');
-  }
-
-  if (!user || !user.orgId) {
-    throw new Error('Authenticated user context with orgId is required.');
-  }
-
-  // 1. Pre-LLM PII Masking (Surrogate Tokenization Guardrail)
-  const { maskedText, tokenMap, hasPII } = maskPII(message);
-
-  // 2. Load Multi-Turn History from Redis
-  const historyTurns = await getSessionHistory(sessionId);
-
-  // 3. Perform Evidence-Based RAG Retrieval (with Zero-Hallucination Guardrail)
-  const retrievalResult = await retrievePolicyContext({
-    query: maskedText, // Query using sanitized text
-    user,
-    embeddingProvider: customEmbeddingProvider,
-    qdrantClient,
-  });
-
-  // 4. Assemble System Prompt with Role Boundaries & Policy Context
-  const systemInstruction = buildSystemInstructions({
-    user,
-    evidenceContext: retrievalResult.contextBlock,
-  });
-
-  // 5. Generate LLM Response
-  let responseText = '';
-
-  if (typeof customLlmProvider === 'function') {
-    // Custom/Mock LLM path for deterministic testing
-    responseText = await customLlmProvider({
-      message: maskedText,
-      history: historyTurns,
-      systemInstruction,
-      retrievalResult,
-      tokenMap,
-    });
-  } else {
-    // Production Gemini API execution
-    if (!config.gemini.apiKey) {
-      throw new Error('Gemini API key is missing. Set GEMINI_API_KEY in .env');
-    }
-
-    const ai = new GoogleGenAI({ apiKey: config.gemini.apiKey });
-
-    // Format history for Gemini API
-    const contents = historyTurns.map((turn) => ({
-      role: turn.role,
-      parts: [{ text: turn.text }],
-    }));
+  if (currentMessage) {
     contents.push({
       role: 'user',
-      parts: [{ text: maskedText }],
+      parts: [{ text: currentMessage }],
     });
+  }
 
-    try {
-      const response = await ai.models.generateContent({
-        model: PRIMARY_MODEL,
-        contents,
-        config: {
-          systemInstruction,
-          temperature: 0.2, // Low temperature for high factual accuracy
-        },
-      });
+  return contents;
+}
 
-      responseText =
+/**
+ * Detect whether an error qualifies for attempting a fallback model
+ * (Rate limits, quota limits, timeouts, and transient service unavailabilities).
+ * Non-transient errors like bad auth or invalid request formats fail immediately.
+ *
+ * @param {Error} err
+ * @returns {boolean}
+ */
+export function isTransientOrRateLimitError(err) {
+  if (!err) return false;
+  const msg = (err.message || '').toLowerCase();
+  const status = err.status || err.statusCode || err.code;
+
+  return (
+    status === 429 ||
+    status === 500 ||
+    status === 502 ||
+    status === 503 ||
+    status === 504 ||
+    msg.includes('429') ||
+    msg.includes('quota') ||
+    msg.includes('resource_exhausted') ||
+    msg.includes('timeout') ||
+    msg.includes('unavailable') ||
+    msg.includes('econnreset')
+  );
+}
+
+/**
+ * Extract real provider token usage metadata when supplied
+ *
+ * @param {Object} rawUsage
+ * @returns {Object|null}
+ */
+export function extractUsageMetadata(rawUsage) {
+  if (!rawUsage) return null;
+  return {
+    promptTokens: rawUsage.promptTokenCount || 0,
+    completionTokens: rawUsage.candidatesTokenCount || 0,
+    totalTokens: rawUsage.totalTokenCount || 0,
+  };
+}
+
+/**
+ * Call Gemini API with timeout, transient fallback model retry, and real usage collection
+ *
+ * @param {Object} params
+ * @param {Array} params.contents Formatted Gemini contents array
+ * @param {string} params.systemInstruction System instruction string
+ * @param {boolean} [params.stream=false] Whether to stream tokens
+ * @param {Function} [params.onToken] Token callback for streaming
+ * @param {number} [params.timeoutMs=REQUEST_TIMEOUT_MS] Request timeout in ms
+ * @returns {Promise<{ text: string, usageMetadata: Object|null }>}
+ */
+async function callGemini({
+  contents,
+  systemInstruction,
+  stream = false,
+  onToken = null,
+  timeoutMs = REQUEST_TIMEOUT_MS,
+}) {
+  if (!config.gemini?.apiKey) {
+    throw new Error('Gemini API key is missing. Set GEMINI_API_KEY in .env');
+  }
+
+  const ai = new GoogleGenAI({ apiKey: config.gemini.apiKey });
+  const modelConfig = {
+    systemInstruction,
+    temperature: 0.2, // Low temperature for high factual accuracy
+  };
+
+  const executeModel = async (modelName) => {
+    let accumulated = '';
+    let rawUsage = null;
+
+    if (stream) {
+      const responseStream = await Promise.race([
+        ai.models.generateContentStream({
+          model: modelName,
+          contents,
+          config: modelConfig,
+        }),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error(`Gemini streaming request timed out after ${timeoutMs}ms`)), timeoutMs)
+        ),
+      ]);
+
+      for await (const chunk of responseStream) {
+        const delta = typeof chunk.text === 'function' ? chunk.text() : chunk.text || '';
+        if (delta) {
+          accumulated += delta;
+          if (typeof onToken === 'function') {
+            onToken(delta);
+          }
+        }
+        if (chunk.usageMetadata) {
+          rawUsage = chunk.usageMetadata;
+        }
+      }
+    } else {
+      const response = await Promise.race([
+        ai.models.generateContent({
+          model: modelName,
+          contents,
+          config: modelConfig,
+        }),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error(`Gemini request timed out after ${timeoutMs}ms`)), timeoutMs)
+        ),
+      ]);
+
+      accumulated =
         response.text?.trim() ||
         response.candidates?.[0]?.content?.parts?.[0]?.text ||
         '';
-    } catch (apiErr) {
-      // Automatic fallback model attempt if primary is busy
-      console.warn(`⚠️ [Orchestrator] Primary model error: ${apiErr.message}. Retrying fallback...`);
-      const fallbackResponse = await ai.models.generateContent({
-        model: FALLBACK_MODEL,
-        contents,
-        config: {
-          systemInstruction,
-          temperature: 0.2,
-        },
-      });
-
-      responseText =
-        fallbackResponse.text?.trim() ||
-        fallbackResponse.candidates?.[0]?.content?.parts?.[0]?.text ||
-        '';
+      rawUsage = response.usageMetadata;
     }
-  }
 
-  // If retrieval was ungrounded and model didn't return text, use guardrail fallback
-  if (!retrievalResult.isGrounded && (!responseText || responseText.length < 5)) {
-    responseText = retrievalResult.fallbackMessage;
-  }
-
-  // 6. Post-LLM De-Tokenization: Restore raw values from surrogate tokens
-  const unmaskedAnswer = hasPII ? unmaskPII(responseText, tokenMap) : responseText;
-
-  // 7. Package Citations and Map References
-  const packaged = packageResponseWithCitations({
-    answerText: unmaskedAnswer,
-    chunks: retrievalResult.chunks,
-    query: message,
-  });
-
-  // 8. Append Turns to Redis Session Memory
-  await appendSessionMessage(sessionId, { role: 'user', text: message });
-  await appendSessionMessage(sessionId, { role: 'model', text: unmaskedAnswer });
-
-  return {
-    sessionId,
-    answer: unmaskedAnswer,
-    isGrounded: retrievalResult.isGrounded,
-    hasCitations: packaged.hasCitations,
-    hasPII,
-    piiMasked: hasPII,
-    citations: packaged.citations,
-    activeCitations: packaged.activeCitations,
-    suggestedAction: retrievalResult.suggestedAction || null,
-    totalHistoryTurns: historyTurns.length + 2,
+    return {
+      text: accumulated,
+      usageMetadata: extractUsageMetadata(rawUsage),
+    };
   };
+
+  try {
+    return await executeModel(PRIMARY_MODEL);
+  } catch (primaryErr) {
+    if (isTransientOrRateLimitError(primaryErr)) {
+      console.warn(
+        `⚠️ [Orchestrator] Primary model (${PRIMARY_MODEL}) transient error: ${primaryErr.message}. Attempting fallback (${FALLBACK_MODEL})...`
+      );
+      try {
+        return await executeModel(FALLBACK_MODEL);
+      } catch (fallbackErr) {
+        console.error(`❌ [Orchestrator] Fallback model (${FALLBACK_MODEL}) also failed: ${fallbackErr.message}`);
+        throw fallbackErr;
+      }
+    }
+    throw primaryErr;
+  }
 }
 
 /**
@@ -401,7 +423,271 @@ export function detectToolIntent(message) {
 }
 
 /**
- * Execute an End-to-End Streaming Copilot Conversation Turn using SSE
+ * Execute an operational tool and synthesize its user-facing text
+ *
+ * @param {Object} params
+ * @param {Object} params.detectedTool Tool intent { tool, args }
+ * @param {Object} params.user Authenticated user
+ * @param {Object} [params.redisClient]
+ * @param {Function} [params.customEmbeddingProvider]
+ * @param {Object} [params.qdrantClient]
+ * @returns {Promise<{ text: string, stagedAction: Object|null }>}
+ */
+async function executeToolIntent({
+  detectedTool,
+  user,
+  redisClient,
+  customEmbeddingProvider,
+  qdrantClient,
+}) {
+  let text = '';
+  let stagedAction = null;
+
+  const toolResult = await executeTool(
+    detectedTool.tool,
+    detectedTool.args || {},
+    {
+      user,
+      redisClient,
+      embeddingProvider: customEmbeddingProvider,
+      qdrantClient,
+    }
+  );
+
+  if (toolResult.isConsequential && toolResult.requiresConfirmation) {
+    stagedAction = {
+      actionId: toolResult.actionId,
+      type: toolResult.actionType,
+      card: toolResult.card,
+      summary: toolResult.summary,
+    };
+    text =
+      toolResult.message ||
+      `I have staged your ${toolResult.actionType} request. Please confirm or decline using the approval card below.`;
+  } else if (detectedTool.tool === 'getLeaveBalance') {
+    text = `Here are your current leave balances, ${toolResult.name || user.name || 'there'}:\n- Casual Leave: ${toolResult.leaveBalances.casual} days\n- Sick Leave: ${toolResult.leaveBalances.sick} days\n- Maternity Leave: ${toolResult.leaveBalances.maternity} days`;
+  } else if (detectedTool.tool === 'getMyTickets') {
+    if (!toolResult.tickets || toolResult.tickets.length === 0) {
+      text = 'You currently have no open support tickets on record.';
+    } else {
+      const ticketLines = toolResult.tickets
+        .slice(0, 5)
+        .map((t) => `- [${t.ticketId}] (${t.status}) ${t.title} [${t.priority} Priority]`)
+        .join('\n');
+      text = `Here are your recent tickets:\n${ticketLines}`;
+    }
+  } else if (detectedTool.tool === 'createTicket') {
+    text = `Support Ticket **${toolResult.ticket.ticketId}** has been opened successfully under category **${toolResult.ticket.category}** with **${toolResult.ticket.priority}** priority.`;
+  } else {
+    text = typeof toolResult === 'string' ? toolResult : JSON.stringify(toolResult);
+  }
+
+  return { text, stagedAction };
+}
+
+/**
+ * Shared post-processing for both streaming and non-streaming copilot turns:
+ * Unmasks PII, packages citations, updates session history, and logs audit events.
+ *
+ * @param {Object} params
+ * @returns {Promise<Object>} Final sanitized turn result
+ */
+async function finalizeTurn({
+  sessionId,
+  user,
+  rawMessage,
+  rawAnswerText,
+  tokenMap,
+  hasPII,
+  chunks = [],
+  historyTurns = [],
+  detectedTool = null,
+  stagedAction = null,
+  usageMetadata = null,
+  isGrounded = true,
+  suggestedAction = null,
+  redisClient = getRedisClient(),
+}) {
+  // 1. Post-LLM De-Tokenization: Restore sensitive surrogate tokens
+  const unmaskedAnswer = hasPII ? unmaskPII(rawAnswerText, tokenMap) : rawAnswerText;
+
+  // 2. Package Citations
+  const packaged = packageResponseWithCitations({
+    answerText: unmaskedAnswer,
+    chunks: chunks || [],
+    query: rawMessage,
+  });
+
+  // 3. Append Turns to Redis Session Memory
+  await appendSessionMessage(sessionId, { role: 'user', text: rawMessage }, redisClient);
+  await appendSessionMessage(sessionId, { role: 'model', text: unmaskedAnswer }, redisClient);
+
+  // 4. Record Audit Log
+  if (user?.orgId) {
+    recordAuditLog({
+      orgId: user.orgId,
+      actor: {
+        userId: user.userId,
+        name: user.name || user.userId,
+        role: user.role || 'employee',
+      },
+      action: detectedTool ? `COPILOT_TURN:${detectedTool.tool}` : 'COPILOT_TURN:RAG_SEARCH',
+      entity: {
+        type: 'copilot_session',
+        id: sessionId,
+      },
+      changes: {
+        after: {
+          detectedTool: detectedTool?.tool || 'searchPolicies',
+          hasCitations: packaged.hasCitations,
+          hasActionRequired: Boolean(stagedAction),
+        },
+      },
+    }).catch(() => {});
+  }
+
+  return {
+    sessionId,
+    answer: unmaskedAnswer,
+    isGrounded,
+    hasCitations: packaged.hasCitations,
+    hasPII,
+    piiMasked: hasPII,
+    citations: packaged.citations,
+    activeCitations: packaged.activeCitations,
+    suggestedAction: stagedAction ? null : suggestedAction,
+    stagedAction: stagedAction || null,
+    totalHistoryTurns: historyTurns.length + 2,
+    usage: usageMetadata || null,
+  };
+}
+
+/**
+ * Execute an End-to-End Non-Streaming Copilot Turn
+ *
+ * @param {Object} params
+ * @param {string} params.sessionId Unique chat session ID
+ * @param {string} params.message Current user message
+ * @param {Object} params.user Authenticated employee user object
+ * @param {Function} [params.customLlmProvider] Optional mock LLM for testing
+ * @param {Function} [params.customEmbeddingProvider] Optional custom embedding provider
+ * @param {Object} [params.qdrantClient] Optional custom Qdrant client
+ * @param {Object} [params.redisClient] Optional custom Redis client
+ * @returns {Promise<Object>} Formatted response with citations and session metadata
+ */
+export async function runCopilotTurn({
+  sessionId,
+  message,
+  user,
+  customLlmProvider = null,
+  customEmbeddingProvider = null,
+  qdrantClient = null,
+  redisClient = getRedisClient(),
+}) {
+  if (!sessionId) {
+    throw new Error('sessionId is required for copilot conversation.');
+  }
+  if (!message || typeof message !== 'string' || message.trim().length === 0) {
+    throw new Error('User message is required.');
+  }
+  if (!user || !user.orgId) {
+    throw new Error('Authenticated user context with orgId is required.');
+  }
+
+  // 1. Pre-LLM PII Masking
+  const { maskedText, tokenMap, hasPII } = maskPII(message);
+
+  // 2. Load Multi-Turn History
+  const historyTurns = await getSessionHistory(sessionId, redisClient);
+
+  // 3. Tool Intent Evaluation
+  const detectedTool = detectToolIntent(message);
+  if (detectedTool && detectedTool.tool !== 'searchPolicies') {
+    const { text, stagedAction } = await executeToolIntent({
+      detectedTool,
+      user,
+      redisClient,
+      customEmbeddingProvider,
+      qdrantClient,
+    });
+
+    return await finalizeTurn({
+      sessionId,
+      user,
+      rawMessage: message,
+      rawAnswerText: text,
+      tokenMap,
+      hasPII,
+      chunks: [],
+      historyTurns,
+      detectedTool,
+      stagedAction,
+      isGrounded: true,
+      redisClient,
+    });
+  }
+
+  // 4. Evidence-Based RAG Retrieval
+  const retrievalResult = await retrievePolicyContext({
+    query: maskedText,
+    user,
+    embeddingProvider: customEmbeddingProvider,
+    qdrantClient,
+  });
+
+  // 5. Assemble System Prompt
+  const systemInstruction = buildSystemInstructions({
+    user,
+    evidenceContext: retrievalResult.contextBlock,
+  });
+
+  let responseText = '';
+  let usageMetadata = null;
+
+  if (typeof customLlmProvider === 'function') {
+    responseText = await customLlmProvider({
+      message: maskedText,
+      history: historyTurns,
+      systemInstruction,
+      retrievalResult,
+      tokenMap,
+    });
+  } else {
+    const contents = formatGeminiContents(historyTurns, maskedText);
+    const geminiResult = await callGemini({
+      contents,
+      systemInstruction,
+      stream: false,
+    });
+    responseText = geminiResult.text;
+    usageMetadata = geminiResult.usageMetadata;
+  }
+
+  // Ungrounded fallback check
+  if (!retrievalResult.isGrounded && (!responseText || responseText.length < 5)) {
+    responseText = retrievalResult.fallbackMessage;
+  }
+
+  return await finalizeTurn({
+    sessionId,
+    user,
+    rawMessage: message,
+    rawAnswerText: responseText,
+    tokenMap,
+    hasPII,
+    chunks: retrievalResult.chunks,
+    historyTurns,
+    detectedTool,
+    usageMetadata,
+    isGrounded: retrievalResult.isGrounded,
+    suggestedAction: retrievalResult.suggestedAction || null,
+    redisClient,
+  });
+}
+
+/**
+ * Execute an End-to-End Streaming Copilot Turn using SSE
+ *
  * Emits real-time SSE events:
  *   - 'tool_call': Dynamic status pills for tools being executed
  *   - 'token': Incremental text chunks
@@ -435,34 +721,33 @@ export async function streamCopilotTurn({
   if (!sessionId) {
     throw new Error('sessionId is required for copilot conversation.');
   }
-
   if (!message || typeof message !== 'string' || message.trim().length === 0) {
     throw new Error('User message is required.');
   }
-
   if (!user || !user.orgId) {
     throw new Error('Authenticated user context with orgId is required.');
   }
-
   if (typeof onEvent !== 'function') {
     throw new Error('onEvent callback function is required for SSE streaming.');
   }
 
-  // 1. Pre-LLM PII Masking (Surrogate Tokenization Guardrail)
+  // 1. Pre-LLM PII Masking
   const { maskedText, tokenMap, hasPII } = maskPII(message);
 
-  // 2. Load Multi-Turn History from Redis
+  // 2. Load Multi-Turn History
   const historyTurns = await getSessionHistory(sessionId, redisClient);
 
   let accumulatedText = '';
-  let citationsPayload = { hasCitations: false, citations: [], activeCitations: [] };
   let stagedActionPayload = null;
+  let usageMetadata = null;
+  let chunks = [];
+  let isGrounded = true;
+  let suggestedAction = null;
 
   // 3. Tool Intent Evaluation
   const detectedTool = explicitToolCall || detectToolIntent(message);
 
   if (detectedTool && detectedTool.tool !== 'searchPolicies') {
-    // A. Emit tool_call event for dynamic status pill
     onEvent('tool_call', {
       tool: detectedTool.tool,
       status: `Executing: ${detectedTool.tool}...`,
@@ -470,58 +755,28 @@ export async function streamCopilotTurn({
     });
 
     try {
-      const toolResult = await executeTool(
-        detectedTool.tool,
-        detectedTool.args || {},
-        {
-          user,
-          redisClient,
-          embeddingProvider: customEmbeddingProvider,
-          qdrantClient,
-        }
-      );
+      const { text, stagedAction } = await executeToolIntent({
+        detectedTool,
+        user,
+        redisClient,
+        customEmbeddingProvider,
+        qdrantClient,
+      });
 
-      // Check if tool is consequential (HITL Gatekeeper triggered)
-      if (toolResult.isConsequential && toolResult.requiresConfirmation) {
-        stagedActionPayload = {
-          actionId: toolResult.actionId,
-          type: toolResult.actionType,
-          card: toolResult.card,
-          summary: toolResult.summary,
-        };
+      stagedActionPayload = stagedAction;
+      accumulatedText = text;
 
-        // Emit action_required event for frontend approval card
+      if (stagedActionPayload) {
         onEvent('action_required', stagedActionPayload);
-
-        accumulatedText =
-          toolResult.message ||
-          `I have staged your ${toolResult.actionType} request. Please confirm or decline using the approval card below.`;
-      } else if (detectedTool.tool === 'getLeaveBalance') {
-        accumulatedText = `Here are your current leave balances, ${toolResult.name || user.name || 'there'}:\n- Casual Leave: ${toolResult.leaveBalances.casual} days\n- Sick Leave: ${toolResult.leaveBalances.sick} days\n- Maternity Leave: ${toolResult.leaveBalances.maternity} days`;
-      } else if (detectedTool.tool === 'getMyTickets') {
-        if (!toolResult.tickets || toolResult.tickets.length === 0) {
-          accumulatedText = 'You currently have no open support tickets on record.';
-        } else {
-          const ticketLines = toolResult.tickets
-            .slice(0, 5)
-            .map((t) => `- [${t.ticketId}] (${t.status}) ${t.title} [${t.priority} Priority]`)
-            .join('\n');
-          accumulatedText = `Here are your recent tickets:\n${ticketLines}`;
-        }
-      } else if (detectedTool.tool === 'createTicket') {
-        accumulatedText = `Support Ticket **${toolResult.ticket.ticketId}** has been opened successfully under category **${toolResult.ticket.category}** with **${toolResult.ticket.priority}** priority.`;
-      } else {
-        accumulatedText = JSON.stringify(toolResult);
       }
 
-      // Stream the synthesized tool response delta
       onEvent('token', { delta: accumulatedText });
     } catch (toolErr) {
       accumulatedText = `⚠️ Error executing ${detectedTool.tool}: ${toolErr.message}`;
       onEvent('token', { delta: accumulatedText });
     }
   } else {
-    // B. Semantic Policy Search Path (Evidence-Based RAG)
+    // 4. Semantic Policy Search (Evidence-Based RAG)
     onEvent('tool_call', {
       tool: 'searchPolicies',
       status: 'Searching ABC Tech policy knowledge base in Qdrant...',
@@ -535,12 +790,16 @@ export async function streamCopilotTurn({
       qdrantClient,
     });
 
+    chunks = retrievalResult?.chunks || [];
+    isGrounded = retrievalResult?.isGrounded ?? false;
+    suggestedAction = retrievalResult?.suggestedAction || null;
+
     const systemInstruction = buildSystemInstructions({
       user,
       evidenceContext: retrievalResult?.contextBlock || '',
     });
 
-    // Generate tokens from LLM
+    // 5. Generate stream from LLM
     if (typeof customLlmStreamProvider === 'function') {
       await customLlmStreamProvider({
         message: maskedText,
@@ -554,155 +813,57 @@ export async function streamCopilotTurn({
         },
       });
     } else {
-      if (!config.gemini.apiKey) {
-        throw new Error('Gemini API key is missing. Set GEMINI_API_KEY in .env');
-      }
+      const contents = formatGeminiContents(historyTurns, maskedText);
+      console.log(`📡 [Orchestrator] Invoking Gemini API (Primary: ${PRIMARY_MODEL})...`);
 
-      const ai = new GoogleGenAI({ apiKey: config.gemini.apiKey });
-      const contents = historyTurns.map((turn) => ({
-        role: turn.role,
-        parts: [{ text: turn.text }],
-      }));
-      contents.push({
-        role: 'user',
-        parts: [{ text: maskedText }],
+      const geminiResult = await callGemini({
+        contents,
+        systemInstruction,
+        stream: true,
+        onToken: (delta) => {
+          accumulatedText += delta;
+          onEvent('token', { delta });
+        },
       });
 
-      let llmSucceeded = false;
-
-      // Try primary Gemini model
-      try {
-        console.log(`📡 [Orchestrator] Calling Gemini API (Model: ${PRIMARY_MODEL})...`);
-        const stream = await ai.models.generateContentStream({
-          model: PRIMARY_MODEL,
-          contents,
-          config: {
-            systemInstruction,
-            temperature: 0.2,
-          },
-        });
-
-        for await (const chunk of stream) {
-          const delta = typeof chunk.text === 'function' ? chunk.text() : chunk.text || '';
-          if (delta) {
-            accumulatedText += delta;
-            onEvent('token', { delta });
-          }
-        }
-        llmSucceeded = true;
-      } catch (streamErr) {
-        console.warn(`⚠️ [Orchestrator Stream] Primary model (${PRIMARY_MODEL}) error: ${streamErr.message}. Trying fallback...`);
-      }
-
-      // Try fallback Gemini model if primary failed
-      if (!llmSucceeded) {
-        try {
-          console.log(`📡 [Orchestrator] Retrying Gemini API with fallback model (${FALLBACK_MODEL})...`);
-          const fallbackStream = await ai.models.generateContentStream({
-            model: FALLBACK_MODEL,
-            contents,
-            config: {
-              systemInstruction,
-              temperature: 0.2,
-            },
-          });
-
-          for await (const chunk of fallbackStream) {
-            const delta = typeof chunk.text === 'function' ? chunk.text() : chunk.text || '';
-            if (delta) {
-              accumulatedText += delta;
-              onEvent('token', { delta });
-            }
-          }
-          llmSucceeded = true;
-        } catch (fallbackErr) {
-          console.warn(`⚠️ [Orchestrator Stream] Fallback model (${FALLBACK_MODEL}) error: ${fallbackErr.message}.`);
-        }
-      }
-
-      // Zero-Hang Resilient Synthesizer:
-      // If external Gemini API is unreachable, offline, rate-limited, or blocked,
-      // synthesize directly from retrieved verified policy evidence so user NEVER hangs!
-      if (!llmSucceeded || !accumulatedText || accumulatedText.trim().length === 0) {
-        if (retrievalResult?.isGrounded && retrievalResult?.chunks?.length > 0) {
-          console.log(`ℹ️  [Orchestrator] Synthesizing answer directly from ${retrievalResult.chunks.length} verified evidence chunks.`);
-          const topChunk = retrievalResult.chunks[0];
-          accumulatedText = `According to ABC Technologies verified policy [1] (§ ${topChunk.sectionTitle}):\n\n${topChunk.text}`;
-          if (retrievalResult.chunks.length > 1) {
-            accumulatedText += `\n\nAdditionally, [2] (§ ${retrievalResult.chunks[1].sectionTitle}):\n${retrievalResult.chunks[1].text}`;
-          }
-          onEvent('token', { delta: accumulatedText });
-        } else {
-          accumulatedText =
-            retrievalResult?.fallbackMessage ||
-            'No company policy covers this topic. Would you like me to raise an HR or IT ticket for assistance?';
-          onEvent('token', { delta: accumulatedText });
-        }
-      }
+      usageMetadata = geminiResult.usageMetadata;
     }
-
-    // Package citations
-    const packaged = packageResponseWithCitations({
-      answerText: accumulatedText,
-      chunks: retrievalResult?.chunks || [],
-      query: message,
-    });
-
-    citationsPayload = {
-      hasCitations: packaged.hasCitations,
-      citations: packaged.citations,
-      activeCitations: packaged.activeCitations,
-    };
   }
 
-  // 4. Post-LLM De-Tokenization: Restore raw values from surrogate tokens
-  const unmaskedAnswer = hasPII ? unmaskPII(accumulatedText, tokenMap) : accumulatedText;
-
-  // 5. Emit Citation Drawer Event
-  onEvent('citation', citationsPayload);
-
-  // 6. Append Session Turns to Redis Sliding Window
-  await appendSessionMessage(sessionId, { role: 'user', text: message }, redisClient);
-  await appendSessionMessage(sessionId, { role: 'model', text: unmaskedAnswer }, redisClient);
-
-  // 7. Emit Done Event
-  onEvent('done', {
+  // 6. Finalize Turn
+  const finalSummary = await finalizeTurn({
     sessionId,
-    totalHistoryTurns: historyTurns.length + 2,
-    hasCitations: citationsPayload.hasCitations,
-    hasActionRequired: Boolean(stagedActionPayload),
-    completedAt: new Date().toISOString(),
+    user,
+    rawMessage: message,
+    rawAnswerText: accumulatedText,
+    tokenMap,
+    hasPII,
+    chunks,
+    historyTurns,
+    detectedTool,
+    stagedAction: stagedActionPayload,
+    usageMetadata,
+    isGrounded,
+    suggestedAction,
+    redisClient,
   });
 
-  // 8. Record copilot interaction in audit log
-  if (user?.orgId) {
-    recordAuditLog({
-      orgId: user.orgId,
-      actor: {
-        userId: user.userId,
-        name: user.name || user.userId,
-        role: user.role || 'employee',
-      },
-      action: detectedTool ? `COPILOT_TURN:${detectedTool.tool}` : 'COPILOT_TURN:RAG_SEARCH',
-      entity: {
-        type: 'copilot_session',
-        id: sessionId,
-      },
-      changes: {
-        after: {
-          detectedTool: detectedTool?.tool || 'searchPolicies',
-          hasCitations: citationsPayload?.hasCitations || false,
-          hasActionRequired: Boolean(stagedActionPayload),
-        },
-      },
-    }).catch(() => {});
-  }
+  // 7. Emit Citation Drawer Event
+  onEvent('citation', {
+    hasCitations: finalSummary.hasCitations,
+    citations: finalSummary.citations,
+    activeCitations: finalSummary.activeCitations,
+  });
 
-  return {
+  // 8. Emit Done Event
+  onEvent('done', {
     sessionId,
-    answer: unmaskedAnswer,
-    hasCitations: citationsPayload.hasCitations,
-    stagedAction: stagedActionPayload,
-    totalHistoryTurns: historyTurns.length + 2,
-  };
+    totalHistoryTurns: finalSummary.totalHistoryTurns,
+    hasCitations: finalSummary.hasCitations,
+    hasActionRequired: Boolean(stagedActionPayload),
+    completedAt: new Date().toISOString(),
+    usage: usageMetadata || undefined,
+  });
+
+  return finalSummary;
 }
