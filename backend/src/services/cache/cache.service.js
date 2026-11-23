@@ -9,7 +9,7 @@ import { getCacheClient, isRedisReady } from '../../config/redis.js';
  *   baked into the cache key, so bumping a tag (INCR) makes every dependent key
  *   unreachable instantly. Orphaned entries simply expire by TTL.
  *
- *   This also removes the stale-write race of delete-based invalidation: a slow request
+ *   This also eliminates stale-write races of delete-based invalidation: a slow request
  *   that read old data before a mutation writes under the OLD version key, which nobody
  *   reads anymore.
  *
@@ -19,19 +19,23 @@ import { getCacheClient, isRedisReady } from '../../config/redis.js';
 export const CACHE_TTL = {
   BALANCE: 300, // 5 minutes
   TICKETS: 120, // 2 minutes
+  NOTIFICATIONS: 60, // 1 minute
 };
 
 const TAG_VERSION_PREFIX = 'cache:tagv:';
 const TAG_VERSION_TTL_SECONDS = 7 * 24 * 3600;
-// Entries must expire long before tag versions do, otherwise an expired version
-// resetting to 0 could resurrect an old entry stored under v0.
+
+// Entries must expire long before tag versions do
 export const MAX_ENTRY_TTL_SECONDS = 24 * 3600;
-// Largest response worth caching; bigger payloads are served uncached
+
+// Maximum payload size to store in cache; larger payloads are served uncached
 export const MAX_ENTRY_BYTES = 512 * 1024;
 
 /**
- * Clamp a TTL to the allowed range and add ±10% jitter, so entries written
- * together don't all expire in the same second (synchronized cache misses).
+ * Clamp a TTL to the allowed range and add ±10% jitter to prevent synchronized cache misses.
+ *
+ * @param {number} ttlSeconds
+ * @returns {number} Effective TTL with jitter applied
  */
 export function effectiveTtl(ttlSeconds) {
   const base = Math.min(Math.max(1, Math.floor(Number(ttlSeconds) || 300)), MAX_ENTRY_TTL_SECONDS);
@@ -48,7 +52,11 @@ function warn(op, key, err) {
 }
 
 /**
- * Read a JSON value. Returns null on miss, Redis down, or error.
+ * Read a JSON value from Redis. Returns null on miss, Redis down, or parse error.
+ *
+ * @param {string} key
+ * @param {Object} [client]
+ * @returns {Promise<Object|null>}
  */
 export async function getCache(key, client = getCacheClient()) {
   if (!key || !isRedisReady(client)) return null;
@@ -62,7 +70,13 @@ export async function getCache(key, client = getCacheClient()) {
 }
 
 /**
- * Write a JSON value with TTL (seconds). Returns false when skipped or failed.
+ * Write a JSON value to Redis with TTL (seconds). Returns false when skipped or failed.
+ *
+ * @param {string} key
+ * @param {*} data
+ * @param {number} [ttlSeconds=300]
+ * @param {Object} [client]
+ * @returns {Promise<boolean>}
  */
 export async function setCache(key, data, ttlSeconds = 300, client = getCacheClient()) {
   if (!key || data === undefined || !isRedisReady(client)) return false;
@@ -78,22 +92,11 @@ export async function setCache(key, data, ttlSeconds = 300, client = getCacheCli
 }
 
 /**
- * Delete a single key.
- */
-export async function invalidateCacheKey(key, client = getCacheClient()) {
-  if (!key || !isRedisReady(client)) return false;
-  try {
-    await client.del(key);
-    return true;
-  } catch (err) {
-    warn('Delete', key, err);
-    return false;
-  }
-}
-
-/**
- * Delete keys by glob pattern using SCAN (non-blocking, unlike KEYS).
- * For maintenance/scripts only — request paths should use tag invalidation.
+ * Delete keys matching a pattern using SCAN (for maintenance / seed scripts).
+ *
+ * @param {string} pattern
+ * @param {Object} [client]
+ * @returns {Promise<boolean>}
  */
 export async function invalidateCachePattern(pattern, client = getCacheClient()) {
   if (!pattern || !isRedisReady(client)) return false;
@@ -115,11 +118,14 @@ export async function invalidateCachePattern(pattern, client = getCacheClient())
 }
 
 // ---------------------------------------------------------------------------
-// Versioned tags
+// Versioned Tags
 // ---------------------------------------------------------------------------
 
 /**
- * Current version for each tag (0 when never bumped).
+ * Get current version for each tag (0 when never bumped).
+ *
+ * @param {string[]} tags
+ * @param {Object} [client]
  * @returns {Promise<number[]|null>} null when Redis is unavailable
  */
 export async function getTagVersions(tags, client = getCacheClient()) {
@@ -136,6 +142,10 @@ export async function getTagVersions(tags, client = getCacheClient()) {
 
 /**
  * Bump tag versions: every cached entry depending on these tags becomes unreachable.
+ *
+ * @param {string[]} tags
+ * @param {Object} [client]
+ * @returns {Promise<boolean>}
  */
 export async function invalidateTags(tags, client = getCacheClient()) {
   const list = [...new Set((tags || []).filter(Boolean))];
@@ -156,20 +166,21 @@ export async function invalidateTags(tags, client = getCacheClient()) {
 }
 
 // ---------------------------------------------------------------------------
-// Tag naming — the single place that defines what depends on what
+// Tag Naming — single source of truth for cache dependency scopes
 // ---------------------------------------------------------------------------
 
 export const cacheTags = {
-  /** Bump to flush everything of a resource for an org (admin/maintenance) */
+  /** Flush everything of a resource for an organization */
   orgFlush: (resource, orgId) => `${resource}:${orgId}:flush`,
-  /** Data owned by one user (their tickets, their balance) */
+  /** User-scoped data (their tickets, their balance, their notifications) */
   user: (resource, orgId, userId) => `${resource}:${orgId}:u:${userId}`,
-  /** Org-wide views (admin "all tickets") */
+  /** Organization-wide views (admin views across an entire tenant) */
   org: (resource, orgId) => `${resource}:${orgId}:all`,
 };
 
 /**
- * A user's tickets changed: refresh their own lists and every org-wide list.
+ * Invalidate ticket caches when a ticket is created or updated.
+ * Refreshes the actor's user-scoped tickets and the org-wide view.
  */
 export function invalidateTicketCaches({ orgId, userId }) {
   if (!orgId) return Promise.resolve(false);
@@ -180,7 +191,7 @@ export function invalidateTicketCaches({ orgId, userId }) {
 }
 
 /**
- * A user's leave balance changed: refresh only that user's balance.
+ * Invalidate leave balance caches when a leave request is processed.
  */
 export function invalidateBalanceCaches({ orgId, userId }) {
   if (!orgId || !userId) return Promise.resolve(false);
@@ -188,7 +199,7 @@ export function invalidateBalanceCaches({ orgId, userId }) {
 }
 
 /**
- * Flush every cached response of a resource for an org.
+ * Flush every cached entry of a resource for an organization.
  */
 export function invalidateResourceForOrg(orgId, resource) {
   if (!orgId || !resource) return Promise.resolve(false);
@@ -196,7 +207,7 @@ export function invalidateResourceForOrg(orgId, resource) {
 }
 
 /**
- * New or read notifications for these users: refresh their unread counts.
+ * Invalidate unread notification badge counts for recipient users.
  */
 export function invalidateNotificationCaches({ orgId, userIds = [] }) {
   if (!orgId || !userIds.length) return Promise.resolve(false);

@@ -2,8 +2,6 @@ import {
   getCache,
   setCache,
   getTagVersions,
-  invalidateTags,
-  invalidateResourceForOrg,
   cacheTags,
   cacheStats,
   CACHE_TTL,
@@ -11,38 +9,28 @@ import {
 import { config } from '../config/environment.js';
 
 /**
- * Route-Level Response Cache
+ * Route-Level Response Cache Middleware
  *
- * Mount AFTER authenticateJwt so RBAC always runs and req.user is known.
+ * Mount AFTER authenticateJwt so authentication and RBAC have already run.
  *
- *   router.get('/', cacheResponse({ ttl: 120, tag: 'tickets', query: ['status', 'page'] }), controller)
+ * Usage:
+ *   router.get('/endpoint', cacheResponse({ ttl: 120, tag: 'tickets', query: ['status', 'page'] }), controller);
  *
- * Response header X-Cache tells you exactly what happened:
- *   HIT         served from Redis, controller skipped
- *   MISS        controller ran, response stored
- *   COALESCED   an identical request was already running; shared its response
- *   BYPASS      caller sent X-Cache-Bypass: 1 (non-production only)
- *   UNCACHEABLE request had a query param not listed in `query` — served uncached
- *   SKIP        cache Redis not ready — controller ran, nothing stored
+ * Response Header X-Cache:
+ *   HIT         Served from Redis, controller skipped
+ *   MISS        Controller ran, response stored in Redis
+ *   COALESCED   An identical request was already running; shared its response
+ *   BYPASS      Caller sent X-Cache-Bypass: 1 (non-production only)
+ *   UNCACHEABLE Request had a query param outside whitelist — served live
+ *   SKIP        Cache Redis unavailable — controller ran live, nothing stored
  *
- * Production safeguards:
- *  - Cache keys are built ONLY from whitelisted query params, sorted. Arbitrary query
- *    strings can't create unbounded keys, and ?a&b / ?b&a share one entry.
- *  - Requests carrying unknown params are served uncached instead of being keyed
- *    on a subset, so a param the controller starts honouring later can never be
- *    answered with another filter's cached response.
- *  - Identical concurrent misses are coalesced in-process (one DB query, not fifty).
- *  - TTL jitter, max entry size and TTL cap are applied in cache.service.
- *  - The browser's `Cache-Control: no-cache` is ignored (Chrome DevTools sends it on
- *    every request with "Disable cache" ticked).
- *
- * @param {Object} options
- * @param {number} [options.ttl=300] Seconds
- * @param {string} options.tag Resource name, e.g. 'tickets' | 'balance'
- * @param {'user'|'org'} [options.scope='user'] Key isolation level
- * @param {string[]} [options.query=[]] Query params that change the response
- * @param {(req) => string[]} [options.tags] Tags this response depends on.
- *        Defaults: user scope → that user's tag; org scope → the org-wide tag.
+ * Key Properties:
+ *  - Tenant isolation: All keys and dependency tags are prefixed with orgId.
+ *  - Scope isolation: User scope prefixes with u_${userId}; Org scope prefixes with org_${orgId}.
+ *  - Sensitive response safety: Cache-Control is set to 'private, no-store'.
+ *  - Only GET requests are cached. Mutations (POST, PUT, PATCH, DELETE) and auth routes are NEVER cached.
+ *  - Request coalescing: In-flight identical requests are coalesced into a single DB execution.
+ *  - Hang-prevention: In-flight promises settle cleanly on finish, close, or a 5-second timeout.
  */
 
 const isProduction = () => config.nodeEnv === 'production';
@@ -50,12 +38,15 @@ const isProduction = () => config.nodeEnv === 'production';
 const MAX_PARAM_LENGTH = 100;
 const COALESCE_WAIT_MS = 5000;
 
-// cacheKey -> Promise<{ status, body } | null> for misses currently being computed
+// cacheKey -> Promise<{ status, body } | null> for in-flight requests
 const inflight = new Map();
 
 /**
  * Build the canonical query segment from whitelisted params.
- * @returns {string|null} null when the request has params outside the whitelist
+ *
+ * @param {Object} reqQuery Express req.query
+ * @param {string[]} allowed Allowed query parameter names
+ * @returns {string|null} null when the request contains unwhitelisted query params
  */
 function canonicalQuery(reqQuery, allowed) {
   const present = Object.keys(reqQuery || {});
@@ -71,6 +62,12 @@ function canonicalQuery(reqQuery, allowed) {
     .join('&');
 }
 
+/**
+ * Wait for an in-flight request to finish, capped by COALESCE_WAIT_MS.
+ *
+ * @param {Promise} promise
+ * @returns {Promise<Object|null>}
+ */
 function waitForInflight(promise) {
   let timer;
   return Promise.race([
@@ -85,18 +82,21 @@ export function cacheResponse(options = {}) {
   const { ttl = CACHE_TTL.BALANCE, tag = 'route', scope = 'user', query = [], tags = null } = options;
 
   return async function cacheMiddleware(req, res, next) {
+    // 1. Never cache non-GET methods or unauthenticated requests
     if (req.method !== 'GET' || !req.user?.orgId) {
       return next();
     }
 
-    // Authenticated, per-user data: never let browsers' shared caches or proxies keep it
+    // 2. Prevent downstream proxies or shared browser caches from storing user data
     res.setHeader('Cache-Control', 'private, no-store');
 
+    // 3. Optional bypass in development / test environments
     if (req.headers?.['x-cache-bypass'] === '1' && !isProduction()) {
       res.setHeader('X-Cache', 'BYPASS');
       return next();
     }
 
+    // 4. Validate query parameters against whitelist to prevent unbounded cache key generation
     const querySegment = canonicalQuery(req.query, query);
     if (querySegment === null) {
       res.setHeader('X-Cache', 'UNCACHEABLE');
@@ -108,7 +108,7 @@ export function cacheResponse(options = {}) {
     const path = `${req.baseUrl || ''}${req.path || ''}`;
     const baseKey = `cache:http:${orgId}:${tag}:${scopeSegment}:${path}?${querySegment}`;
 
-    // Resolve dependency tags (always include the org-wide flush tag)
+    // 5. Resolve dependency tags for versioned invalidation
     let dependencyTags;
     try {
       dependencyTags =
@@ -121,6 +121,7 @@ export function cacheResponse(options = {}) {
     }
     dependencyTags = [cacheTags.orgFlush(tag, orgId), ...dependencyTags.filter(Boolean)];
 
+    // 6. Read tag versions. If Redis is unavailable, fail open (SKIP)
     const versions = await getTagVersions(dependencyTags);
     if (versions === null) {
       cacheStats.skips++;
@@ -133,6 +134,7 @@ export function cacheResponse(options = {}) {
       res.setHeader('X-Cache-Key', cacheKey);
     }
 
+    // 7. Check cache HIT in Redis
     const cached = await getCache(cacheKey);
     if (cached && cached.body !== undefined) {
       cacheStats.hits++;
@@ -141,7 +143,7 @@ export function cacheResponse(options = {}) {
       return res.status(cached.status || 200).json(cached.body);
     }
 
-    // Another request is already computing this exact response: wait for it
+    // 8. Request coalescing: If an identical request is currently computing, wait for its result
     if (inflight.has(cacheKey)) {
       const shared = await waitForInflight(inflight.get(cacheKey));
       if (shared) {
@@ -149,27 +151,36 @@ export function cacheResponse(options = {}) {
         res.setHeader('X-Cache', 'COALESCED');
         return res.status(shared.status).json(shared.body);
       }
-      // Leader failed or timed out — compute independently
+      // If leader timed out or failed, fall through to compute independently
     }
 
     cacheStats.misses++;
     res.setHeader('X-Cache', 'MISS');
 
-    // Become the leader for this key
+    // 9. Become leader for this cacheKey
     let settle;
     const leaderPromise = new Promise((resolve) => {
       settle = (value) => {
-        if (inflight.get(cacheKey) === leaderPromise) inflight.delete(cacheKey);
+        if (inflight.get(cacheKey) === leaderPromise) {
+          inflight.delete(cacheKey);
+        }
         resolve(value);
       };
     });
+
+    // Safety timeout to prevent any lingering in-flight entries
+    const safetyTimer = setTimeout(() => settle(null), 10000);
+    leaderPromise.finally(() => clearTimeout(safetyTimer));
+
     if (!inflight.has(cacheKey)) {
       inflight.set(cacheKey, leaderPromise);
     }
 
-    // Response never produced JSON (error handler, client abort...): release followers
-    res.on('close', () => settle(null));
+    // Settle promise if client disconnects or request finishes without sending JSON
+    res.once('close', () => settle(null));
+    res.once('finish', () => settle(null));
 
+    // 10. Intercept res.json to capture successful responses
     const originalJson = res.json.bind(res);
     res.json = function cacheCapturingJson(body) {
       res.json = originalJson;
@@ -177,7 +188,7 @@ export function cacheResponse(options = {}) {
       if (ok) {
         const entry = { status: res.statusCode, body, storedAt: Date.now() };
         settle(entry);
-        // Fire-and-forget: never delay the response for the cache write
+        // Fire-and-forget: do not block the client response for the cache write
         setCache(cacheKey, entry, ttl);
       } else {
         settle(null);
@@ -187,35 +198,4 @@ export function cacheResponse(options = {}) {
 
     return next();
   };
-}
-
-/**
- * Route-level invalidation for routes that only mutate through REST.
- * Bumps tags once the response finished with 2xx.
- *
- * Prefer the service-level helpers (invalidateTicketCaches, invalidateBalanceCaches)
- * when the same mutation can also happen from the copilot chat / HITL approvals.
- *
- * @param {(req, res) => string[]} tagsResolver
- */
-export function invalidateCache(tagsResolver) {
-  return function invalidateCacheMiddleware(req, res, next) {
-    res.on('finish', () => {
-      if (res.statusCode < 200 || res.statusCode >= 300) return;
-      try {
-        const tagList = typeof tagsResolver === 'function' ? tagsResolver(req, res) : tagsResolver;
-        invalidateTags(Array.isArray(tagList) ? tagList : [tagList]);
-      } catch (err) {
-        console.warn(`⚠️ [Cache Invalidation] ${err.message}`);
-      }
-    });
-    next();
-  };
-}
-
-/**
- * Flush every cached response of a resource for an org (kept for backwards compatibility).
- */
-export function invalidateHttpCache(orgId, resource) {
-  return invalidateResourceForOrg(orgId, resource);
 }
