@@ -1,14 +1,14 @@
-import { GoogleGenAI } from '@google/genai';
-import { config } from '../../config/environment.js';
-import { getRedisClient } from '../../config/redis.js';
-import { retrievePolicyContext } from '../rag/retrieval.service.js';
-import { packageResponseWithCitations } from '../rag/citation.service.js';
-import { maskPII, unmaskPII } from './piiMasker.service.js';
-import { executeTool } from '../tools/toolRegistry.service.js';
-import { recordAuditLog } from '../audit/audit.service.js';
+import { GoogleGenAI } from "@google/genai";
+import { config } from "../../config/environment.js";
+import { getRedisClient } from "../../config/redis.js";
+import { retrievePolicyContext } from "../rag/retrieval.service.js";
+import { packageResponseWithCitations } from "../rag/citation.service.js";
+import { maskPII, unmaskPII } from "./piiMasker.service.js";
+import { executeTool } from "../tools/toolRegistry.service.js";
+import { recordAuditLog } from "../audit/audit.service.js";
 
-export const PRIMARY_MODEL = 'gemini-2.5-flash';
-export const FALLBACK_MODEL = 'gemini-2.0-flash';
+export const PRIMARY_MODEL = "gemini-3.5-flash";
+export const FALLBACK_MODEL = "gemini-2.0-flash";
 
 export const SESSION_TTL_SECONDS = 86400; // 24-hour session TTL
 export const MAX_SESSION_MESSAGES = 20; // Last 10 turns (user + assistant)
@@ -36,14 +36,17 @@ const REQUEST_TIMEOUT_MS = 25000; // 25 seconds timeout for LLM generation
 const inMemorySessionStore = new Map();
 
 // Periodic cleanup of in-memory fallback sessions
-const sessionCleanupTimer = setInterval(() => {
-  const now = Date.now();
-  for (const [key, session] of inMemorySessionStore.entries()) {
-    if (session.expiresAt <= now) {
-      inMemorySessionStore.delete(key);
+const sessionCleanupTimer = setInterval(
+  () => {
+    const now = Date.now();
+    for (const [key, session] of inMemorySessionStore.entries()) {
+      if (session.expiresAt <= now) {
+        inMemorySessionStore.delete(key);
+      }
     }
-  }
-}, 10 * 60 * 1000);
+  },
+  10 * 60 * 1000,
+);
 
 if (sessionCleanupTimer.unref) {
   sessionCleanupTimer.unref();
@@ -53,14 +56,17 @@ if (sessionCleanupTimer.unref) {
 const inMemorySessionOwners = new Map();
 
 // Periodic cleanup of in-memory session owners
-const sessionOwnerCleanupTimer = setInterval(() => {
-  const now = Date.now();
-  for (const [key, owner] of inMemorySessionOwners.entries()) {
-    if (owner.expiresAt <= now) {
-      inMemorySessionOwners.delete(key);
+const sessionOwnerCleanupTimer = setInterval(
+  () => {
+    const now = Date.now();
+    for (const [key, owner] of inMemorySessionOwners.entries()) {
+      if (owner.expiresAt <= now) {
+        inMemorySessionOwners.delete(key);
+      }
     }
-  }
-}, 10 * 60 * 1000);
+  },
+  10 * 60 * 1000,
+);
 
 if (sessionOwnerCleanupTimer.unref) {
   sessionOwnerCleanupTimer.unref();
@@ -70,9 +76,11 @@ if (sessionOwnerCleanupTimer.unref) {
  * Custom Error for Session Ownership Violations
  */
 export class SessionOwnershipError extends Error {
-  constructor(message = 'Session ownership validation failed: Unauthorized session access.') {
+  constructor(
+    message = "Session ownership validation failed: Unauthorized session access.",
+  ) {
     super(message);
-    this.name = 'SessionOwnershipError';
+    this.name = "SessionOwnershipError";
     this.statusCode = 403;
   }
 }
@@ -119,9 +127,9 @@ export function buildSessionKey({ orgId, userId, sessionId }) {
   if (orgId && userId) {
     return `session:${String(orgId).trim()}:${String(userId).trim()}:${cleanSessionId}:messages`;
   }
-  if (config.nodeEnv === 'production') {
+  if (config.nodeEnv === "production") {
     throw new SessionOwnershipError(
-      'Cannot build unscoped session key: orgId and userId are strictly required in production.'
+      "Cannot build unscoped session key: orgId and userId are strictly required in production.",
     );
   }
   return `session:${cleanSessionId}:messages`;
@@ -142,7 +150,7 @@ export async function resolveSessionKey(target, user = null, client = null) {
   let orgId = null;
   let userId = null;
 
-  if (typeof target === 'object' && target !== null) {
+  if (typeof target === "object" && target !== null) {
     sessionId = target.sessionId || target.id;
     orgId = target.orgId || target.user?.orgId || user?.orgId;
     userId = target.userId || target.user?.userId || user?.userId;
@@ -158,19 +166,23 @@ export async function resolveSessionKey(target, user = null, client = null) {
 
   // In production, strictly require authenticated identity (orgId and userId).
   // The Redis ownership registry must NEVER replace authenticated identity in production.
-  if (config.nodeEnv === 'production') {
+  if (config.nodeEnv === "production") {
     throw new SessionOwnershipError(
-      `Cannot resolve session key for '${sessionId || 'unknown'}': Authenticated user context with orgId and userId is strictly required in production.`
+      `Cannot resolve session key for '${sessionId || "unknown"}': Authenticated user context with orgId and userId is strictly required in production.`,
     );
   }
 
   // Non-production fallback only (dev / test backward compatibility):
-  const cleanSessionId = String(sessionId || '').trim();
+  const cleanSessionId = String(sessionId || "").trim();
 
   // Check in-memory ownership registry (non-prod)
   const memOwner = inMemorySessionOwners.get(cleanSessionId);
   if (memOwner?.orgId && memOwner?.userId) {
-    return buildSessionKey({ orgId: memOwner.orgId, userId: memOwner.userId, sessionId: cleanSessionId });
+    return buildSessionKey({
+      orgId: memOwner.orgId,
+      userId: memOwner.userId,
+      sessionId: cleanSessionId,
+    });
   }
 
   // Check Redis ownership registry (non-prod)
@@ -180,7 +192,11 @@ export async function resolveSessionKey(target, user = null, client = null) {
       if (rawOwner) {
         const owner = JSON.parse(rawOwner);
         if (owner.orgId && owner.userId) {
-          return buildSessionKey({ orgId: owner.orgId, userId: owner.userId, sessionId: cleanSessionId });
+          return buildSessionKey({
+            orgId: owner.orgId,
+            userId: owner.userId,
+            sessionId: cleanSessionId,
+          });
         }
       }
     } catch {
@@ -205,12 +221,20 @@ export async function resolveSessionKey(target, user = null, client = null) {
  * @param {Object} [params.client] Redis client instance
  * @returns {Promise<boolean>} True if ownership is valid and active
  */
-export async function validateSessionOwnership({ sessionId, user, client = getRedisClient() }) {
-  if (!sessionId || typeof sessionId !== 'string' || !sessionId.trim()) {
-    throw new SessionOwnershipError('sessionId is required for ownership validation.');
+export async function validateSessionOwnership({
+  sessionId,
+  user,
+  client = getRedisClient(),
+}) {
+  if (!sessionId || typeof sessionId !== "string" || !sessionId.trim()) {
+    throw new SessionOwnershipError(
+      "sessionId is required for ownership validation.",
+    );
   }
   if (!user || !user.orgId || !user.userId) {
-    throw new SessionOwnershipError('Authenticated user with orgId and userId is required.');
+    throw new SessionOwnershipError(
+      "Authenticated user with orgId and userId is required.",
+    );
   }
 
   const cleanSessionId = sessionId.trim();
@@ -224,10 +248,10 @@ export async function validateSessionOwnership({ sessionId, user, client = getRe
         const owner = JSON.parse(rawOwner);
         if (owner.orgId !== user.orgId || owner.userId !== user.userId) {
           console.warn(
-            `🚨 [Security] Session ownership breach: User '${user.userId}' (Org: '${user.orgId}') attempted to access session '${cleanSessionId}' owned by '${owner.userId}' (Org: '${owner.orgId}').`
+            `🚨 [Security] Session ownership breach: User '${user.userId}' (Org: '${user.orgId}') attempted to access session '${cleanSessionId}' owned by '${owner.userId}' (Org: '${owner.orgId}').`,
           );
           throw new SessionOwnershipError(
-            `Forbidden: Session '${cleanSessionId}' does not belong to the authenticated user.`
+            `Forbidden: Session '${cleanSessionId}' does not belong to the authenticated user.`,
           );
         }
         // Refresh TTL on active access
@@ -252,9 +276,12 @@ export async function validateSessionOwnership({ sessionId, user, client = getRe
         const currentRaw = await client.get(ownerKey);
         if (currentRaw) {
           const currentOwner = JSON.parse(currentRaw);
-          if (currentOwner.orgId !== user.orgId || currentOwner.userId !== user.userId) {
+          if (
+            currentOwner.orgId !== user.orgId ||
+            currentOwner.userId !== user.userId
+          ) {
             throw new SessionOwnershipError(
-              `Forbidden: Session '${cleanSessionId}' does not belong to the authenticated user.`
+              `Forbidden: Session '${cleanSessionId}' does not belong to the authenticated user.`,
             );
           }
         }
@@ -262,15 +289,19 @@ export async function validateSessionOwnership({ sessionId, user, client = getRe
       return true;
     } catch (err) {
       if (err instanceof SessionOwnershipError) throw err;
-      if (config.nodeEnv === 'production') {
-        console.error(`🚨 [Orchestrator] Redis session ownership error (${cleanSessionId}): ${err.message}`);
-        const serviceErr = new Error(`Service Unavailable: Redis session ownership error - ${err.message}`);
+      if (config.nodeEnv === "production") {
+        console.error(
+          `🚨 [Orchestrator] Redis session ownership error (${cleanSessionId}): ${err.message}`,
+        );
+        const serviceErr = new Error(
+          `Service Unavailable: Redis session ownership error - ${err.message}`,
+        );
         serviceErr.statusCode = 503;
         throw serviceErr;
       }
     }
-  } else if (config.nodeEnv === 'production') {
-    const serviceErr = new Error('Service Unavailable: Redis is unavailable.');
+  } else if (config.nodeEnv === "production") {
+    const serviceErr = new Error("Service Unavailable: Redis is unavailable.");
     serviceErr.statusCode = 503;
     throw serviceErr;
   }
@@ -280,10 +311,10 @@ export async function validateSessionOwnership({ sessionId, user, client = getRe
   if (memOwner && memOwner.expiresAt > Date.now()) {
     if (memOwner.orgId !== user.orgId || memOwner.userId !== user.userId) {
       console.warn(
-        `🚨 [Security] In-memory session ownership breach: User '${user.userId}' (Org: '${user.orgId}') attempted to access session '${cleanSessionId}' owned by '${memOwner.userId}' (Org: '${memOwner.orgId}').`
+        `🚨 [Security] In-memory session ownership breach: User '${user.userId}' (Org: '${user.orgId}') attempted to access session '${cleanSessionId}' owned by '${memOwner.userId}' (Org: '${memOwner.orgId}').`,
       );
       throw new SessionOwnershipError(
-        `Forbidden: Session '${cleanSessionId}' does not belong to the authenticated user.`
+        `Forbidden: Session '${cleanSessionId}' does not belong to the authenticated user.`,
       );
     }
     memOwner.expiresAt = Date.now() + SESSION_TTL_SECONDS * 1000;
@@ -307,7 +338,11 @@ export async function validateSessionOwnership({ sessionId, user, client = getRe
  * @param {Object} [user]
  * @returns {Promise<Array<{ role: string, text: string, timestamp: string }>>}
  */
-export async function getSessionHistory(sessionTarget, client = getRedisClient(), user = null) {
+export async function getSessionHistory(
+  sessionTarget,
+  client = getRedisClient(),
+  user = null,
+) {
   if (!sessionTarget) return [];
 
   const key = await resolveSessionKey(sessionTarget, user, client);
@@ -318,18 +353,28 @@ export async function getSessionHistory(sessionTarget, client = getRedisClient()
       const rawTurns = await client.lRange(key, -MAX_SESSION_MESSAGES, -1);
       return rawTurns.map((turnStr) => JSON.parse(turnStr));
     } catch (err) {
-      if (config.nodeEnv === 'production') {
-        console.error(`🚨 [Orchestrator] Redis session read failed in production (${key}): ${err.message}`);
-        const serviceErr = new Error(`Service Unavailable: Redis session read error - ${err.message}`);
+      if (config.nodeEnv === "production") {
+        console.error(
+          `🚨 [Orchestrator] Redis session read failed in production (${key}): ${err.message}`,
+        );
+        const serviceErr = new Error(
+          `Service Unavailable: Redis session read error - ${err.message}`,
+        );
         serviceErr.statusCode = 503;
         throw serviceErr;
       } else {
-        console.warn(`⚠️ [Orchestrator] Redis session read error: ${err.message}. Using memory store.`);
+        console.warn(
+          `⚠️ [Orchestrator] Redis session read error: ${err.message}. Using memory store.`,
+        );
       }
     }
-  } else if (config.nodeEnv === 'production') {
-    console.error(`🚨 [Orchestrator] Redis unavailable in production for session read (${key}).`);
-    const serviceErr = new Error('Service Unavailable: Redis session store is unavailable.');
+  } else if (config.nodeEnv === "production") {
+    console.error(
+      `🚨 [Orchestrator] Redis unavailable in production for session read (${key}).`,
+    );
+    const serviceErr = new Error(
+      "Service Unavailable: Redis session store is unavailable.",
+    );
     serviceErr.statusCode = 503;
     throw serviceErr;
   }
@@ -350,7 +395,12 @@ export async function getSessionHistory(sessionTarget, client = getRedisClient()
  * @param {Object} [client]
  * @param {Object} [user]
  */
-export async function appendSessionMessage(sessionTarget, message, client = getRedisClient(), user = null) {
+export async function appendSessionMessage(
+  sessionTarget,
+  message,
+  client = getRedisClient(),
+  user = null,
+) {
   if (!sessionTarget || !message) return;
 
   const key = await resolveSessionKey(sessionTarget, user, client);
@@ -368,18 +418,28 @@ export async function appendSessionMessage(sessionTarget, message, client = getR
       await client.expire(key, SESSION_TTL_SECONDS);
       return;
     } catch (err) {
-      if (config.nodeEnv === 'production') {
-        console.error(`🚨 [Orchestrator] Redis session write failed in production (${key}): ${err.message}`);
-        const serviceErr = new Error(`Service Unavailable: Redis session write error - ${err.message}`);
+      if (config.nodeEnv === "production") {
+        console.error(
+          `🚨 [Orchestrator] Redis session write failed in production (${key}): ${err.message}`,
+        );
+        const serviceErr = new Error(
+          `Service Unavailable: Redis session write error - ${err.message}`,
+        );
         serviceErr.statusCode = 503;
         throw serviceErr;
       } else {
-        console.warn(`⚠️ [Orchestrator] Redis session write error: ${err.message}. Saving to memory store.`);
+        console.warn(
+          `⚠️ [Orchestrator] Redis session write error: ${err.message}. Saving to memory store.`,
+        );
       }
     }
-  } else if (config.nodeEnv === 'production') {
-    console.error(`🚨 [Orchestrator] Redis unavailable in production for session write (${key}).`);
-    const serviceErr = new Error('Service Unavailable: Redis session store is unavailable.');
+  } else if (config.nodeEnv === "production") {
+    console.error(
+      `🚨 [Orchestrator] Redis unavailable in production for session write (${key}).`,
+    );
+    const serviceErr = new Error(
+      "Service Unavailable: Redis session store is unavailable.",
+    );
     serviceErr.statusCode = 503;
     throw serviceErr;
   }
@@ -410,27 +470,36 @@ export async function appendSessionMessage(sessionTarget, message, client = getR
  * @param {Object} [client] Redis client
  * @param {Object} [user] Authenticated user object { orgId, userId }
  */
-export async function clearSessionHistory(sessionTarget, client = getRedisClient(), user = null) {
+export async function clearSessionHistory(
+  sessionTarget,
+  client = getRedisClient(),
+  user = null,
+) {
   if (!sessionTarget) return;
 
-  const rawSessionId = typeof sessionTarget === 'object' && sessionTarget !== null
-    ? (sessionTarget.sessionId || sessionTarget.id)
-    : sessionTarget;
+  const rawSessionId =
+    typeof sessionTarget === "object" && sessionTarget !== null
+      ? sessionTarget.sessionId || sessionTarget.id
+      : sessionTarget;
 
-  if (!rawSessionId || typeof rawSessionId !== 'string') return;
+  if (!rawSessionId || typeof rawSessionId !== "string") return;
   const cleanSessionId = rawSessionId.trim();
 
-  const orgId = typeof sessionTarget === 'object' && sessionTarget !== null
-    ? (sessionTarget.orgId || sessionTarget.user?.orgId || user?.orgId)
-    : user?.orgId;
-  const userId = typeof sessionTarget === 'object' && sessionTarget !== null
-    ? (sessionTarget.userId || sessionTarget.user?.userId || user?.userId)
-    : user?.userId;
+  const orgId =
+    typeof sessionTarget === "object" && sessionTarget !== null
+      ? sessionTarget.orgId || sessionTarget.user?.orgId || user?.orgId
+      : user?.orgId;
+  const userId =
+    typeof sessionTarget === "object" && sessionTarget !== null
+      ? sessionTarget.userId || sessionTarget.user?.userId || user?.userId
+      : user?.userId;
 
   // In production, authenticated orgId and userId are strictly required
   if (!orgId || !userId) {
-    if (config.nodeEnv === 'production') {
-      throw new SessionOwnershipError('Cannot clear session history: orgId and userId are strictly required in production.');
+    if (config.nodeEnv === "production") {
+      throw new SessionOwnershipError(
+        "Cannot clear session history: orgId and userId are strictly required in production.",
+      );
     }
     // Dev/test backward compatibility: delete unscoped test key without touching ownership registry
     const legacyKey = `session:${cleanSessionId}:messages`;
@@ -438,7 +507,9 @@ export async function clearSessionHistory(sessionTarget, client = getRedisClient
       try {
         await client.del(legacyKey);
       } catch (err) {
-        console.warn(`⚠️ [Orchestrator] Redis legacy session delete error: ${err.message}`);
+        console.warn(
+          `⚠️ [Orchestrator] Redis legacy session delete error: ${err.message}`,
+        );
       }
     }
     inMemorySessionStore.delete(legacyKey);
@@ -448,7 +519,11 @@ export async function clearSessionHistory(sessionTarget, client = getRedisClient
   const cleanOrgId = String(orgId).trim();
   const cleanUserId = String(userId).trim();
   const ownerKey = `session:owner:${cleanSessionId}`;
-  const historyKey = buildSessionKey({ orgId: cleanOrgId, userId: cleanUserId, sessionId: cleanSessionId });
+  const historyKey = buildSessionKey({
+    orgId: cleanOrgId,
+    userId: cleanUserId,
+    sessionId: cleanSessionId,
+  });
 
   // 1. Primary path: Atomic Lua check-and-delete in Redis
   if (client && (client.isReady || client.isOpen)) {
@@ -460,20 +535,26 @@ export async function clearSessionHistory(sessionTarget, client = getRedisClient
 
       if (result === -1) {
         throw new SessionOwnershipError(
-          `Forbidden: Session '${cleanSessionId}' does not belong to the authenticated user.`
+          `Forbidden: Session '${cleanSessionId}' does not belong to the authenticated user.`,
         );
       }
     } catch (err) {
       if (err instanceof SessionOwnershipError) throw err;
-      if (config.nodeEnv === 'production') {
-        const serviceErr = new Error(`Service Unavailable: Redis session delete error - ${err.message}`);
+      if (config.nodeEnv === "production") {
+        const serviceErr = new Error(
+          `Service Unavailable: Redis session delete error - ${err.message}`,
+        );
         serviceErr.statusCode = 503;
         throw serviceErr;
       }
-      console.warn(`⚠️ [Orchestrator] Redis session delete error: ${err.message}`);
+      console.warn(
+        `⚠️ [Orchestrator] Redis session delete error: ${err.message}`,
+      );
     }
-  } else if (config.nodeEnv === 'production') {
-    const serviceErr = new Error('Service Unavailable: Redis session store is unavailable.');
+  } else if (config.nodeEnv === "production") {
+    const serviceErr = new Error(
+      "Service Unavailable: Redis session store is unavailable.",
+    );
     serviceErr.statusCode = 503;
     throw serviceErr;
   }
@@ -483,7 +564,7 @@ export async function clearSessionHistory(sessionTarget, client = getRedisClient
   if (memOwner) {
     if (memOwner.orgId !== cleanOrgId || memOwner.userId !== cleanUserId) {
       throw new SessionOwnershipError(
-        `Forbidden: Session '${cleanSessionId}' does not belong to the authenticated user.`
+        `Forbidden: Session '${cleanSessionId}' does not belong to the authenticated user.`,
       );
     }
     inMemorySessionOwners.delete(cleanSessionId);
@@ -499,52 +580,53 @@ export async function clearSessionHistory(sessionTarget, client = getRedisClient
  * @param {string} [params.evidenceContext] RAG evidence context block
  * @returns {string} System instruction string
  */
-export function buildSystemInstructions({ user, evidenceContext = '' }) {
-  const userName = user?.name || 'Employee';
-  const userId = user?.userId || 'unknown';
-  const userRole = user?.role || 'employee';
-  const orgId = user?.orgId || 'org_abc';
-  const department = user?.department || 'General';
+export function buildSystemInstructions({ user, evidenceContext = "" }) {
+  const userName = user?.name || "Employee";
+  const userId = user?.userId || "unknown";
+  const userRole = user?.role || "employee";
+  const orgId = user?.orgId || "org_abc";
+  const department = user?.department || "General";
 
   const roleRules = {
     employee:
       "- Role Privileges: Self-service operations only. You can view your own leave balance, active tickets, apply for leaves, and request hardware refreshes.\n- Role Boundaries: You CANNOT approve leave requests or inspect other employees' sensitive records.",
     manager:
-      '- Role Privileges: Team management. You supervise your direct reports, can inspect team leave requests, and approve/reject team actions.\n- Role Boundaries: You cannot alter global organization configuration.',
+      "- Role Privileges: Team management. You supervise your direct reports, can inspect team leave requests, and approve/reject team actions.\n- Role Boundaries: You cannot alter global organization configuration.",
     hr_admin:
-      '- Role Privileges: Human resources administration. You can upload and inspect all HR policies, audit company-wide leave balances, and review HR support tickets.',
+      "- Role Privileges: Human resources administration. You can upload and inspect all HR policies, audit company-wide leave balances, and review HR support tickets.",
     it_admin:
-      '- Role Privileges: IT systems and hardware inventory administration. You can upload and inspect IT policies, review hardware asset allocations, and process hardware upgrades.',
+      "- Role Privileges: IT systems and hardware inventory administration. You can upload and inspect IT policies, review hardware asset allocations, and process hardware upgrades.",
     org_admin:
-      '- Role Privileges: Complete organization oversight across HR and IT departments.',
+      "- Role Privileges: Complete organization oversight across HR and IT departments.",
     super_admin:
-      '- Role Privileges: Platform root owner with diagnostic and tenant provisioning authority.',
+      "- Role Privileges: Platform root owner with diagnostic and tenant provisioning authority.",
   };
 
   const selectedRoleGuidance = roleRules[userRole] || roleRules.employee;
 
   return [
-    '=== OMNIDESK AI: ENTERPRISE IT & HR OPERATIONS COPILOT ===',
-    'You are OmniDesk AI, the autonomous IT and HR operations copilot for ABC Technologies.',
-    '',
-    '--- CURRENT USER CONTEXT ---',
+    "=== OMNIDESK AI: ENTERPRISE IT & HR OPERATIONS COPILOT ===",
+    "You are OmniDesk AI, the autonomous IT and HR operations copilot for ABC Technologies.",
+    "",
+    "--- CURRENT USER CONTEXT ---",
     `Name        : ${userName}`,
     `Employee ID : ${userId}`,
     `Tenant Org  : ${orgId}`,
     `Department  : ${department}`,
     `User Role   : ${userRole}`,
-    '',
-    '--- ROLE-BASED ACCESS CONTROL (RBAC) GOVERNANCE ---',
+    "",
+    "--- ROLE-BASED ACCESS CONTROL (RBAC) GOVERNANCE ---",
     selectedRoleGuidance,
-    '',
-    '--- ZERO-HALLUCINATION & CITATION RULES ---',
-    '1. When verified policy excerpts are provided below, answer using ONLY that evidence.',
-    '2. You MUST cite references using in-text numbered badges like [1], [2], corresponding to the policy sources.',
+    "",
+    "--- ZERO-HALLUCINATION & CITATION RULES ---",
+    "1. When verified policy excerpts are provided below, answer using ONLY that evidence.",
+    "2. You MUST cite references using in-text numbered badges like [1], [2], corresponding to the policy sources.",
     '3. If no policy evidence is provided or the topic is not covered, state plainly: "No company policy covers this topic. Would you like me to raise an HR or IT ticket for assistance?"',
-    '4. Never fabricate policies, entitlement quotas, or corporate rules.',
-    '',
-    evidenceContext || 'No verified organization policies attached for this query.',
-  ].join('\n');
+    "4. Never fabricate policies, entitlement quotas, or corporate rules.",
+    "",
+    evidenceContext ||
+      "No verified organization policies attached for this query.",
+  ].join("\n");
 }
 
 /**
@@ -554,15 +636,15 @@ export function buildSystemInstructions({ user, evidenceContext = '' }) {
  * @param {string} currentMessage Masked user query
  * @returns {Array<{ role: string, parts: Array<{ text: string }> }>}
  */
-export function formatGeminiContents(historyTurns = [], currentMessage = '') {
+export function formatGeminiContents(historyTurns = [], currentMessage = "") {
   const contents = (historyTurns || []).map((turn) => ({
-    role: turn.role === 'model' || turn.role === 'assistant' ? 'model' : 'user',
-    parts: [{ text: turn.text || '' }],
+    role: turn.role === "model" || turn.role === "assistant" ? "model" : "user",
+    parts: [{ text: turn.text || "" }],
   }));
 
   if (currentMessage) {
     contents.push({
-      role: 'user',
+      role: "user",
       parts: [{ text: currentMessage }],
     });
   }
@@ -580,7 +662,7 @@ export function formatGeminiContents(historyTurns = [], currentMessage = '') {
  */
 export function isTransientOrRateLimitError(err) {
   if (!err) return false;
-  const msg = (err.message || '').toLowerCase();
+  const msg = (err.message || "").toLowerCase();
   const status = err.status || err.statusCode || err.code;
 
   return (
@@ -589,12 +671,12 @@ export function isTransientOrRateLimitError(err) {
     status === 502 ||
     status === 503 ||
     status === 504 ||
-    msg.includes('429') ||
-    msg.includes('quota') ||
-    msg.includes('resource_exhausted') ||
-    msg.includes('timeout') ||
-    msg.includes('unavailable') ||
-    msg.includes('econnreset')
+    msg.includes("429") ||
+    msg.includes("quota") ||
+    msg.includes("resource_exhausted") ||
+    msg.includes("timeout") ||
+    msg.includes("unavailable") ||
+    msg.includes("econnreset")
   );
 }
 
@@ -632,7 +714,7 @@ async function callGemini({
   timeoutMs = REQUEST_TIMEOUT_MS,
 }) {
   if (!config.gemini?.apiKey) {
-    throw new Error('Gemini API key is missing. Set GEMINI_API_KEY in .env');
+    throw new Error("Gemini API key is missing. Set GEMINI_API_KEY in .env");
   }
 
   const ai = new GoogleGenAI({ apiKey: config.gemini.apiKey });
@@ -642,7 +724,7 @@ async function callGemini({
   };
 
   const executeModel = async (modelName) => {
-    let accumulated = '';
+    let accumulated = "";
     let rawUsage = null;
 
     if (stream) {
@@ -653,15 +735,24 @@ async function callGemini({
           config: modelConfig,
         }),
         new Promise((_, reject) =>
-          setTimeout(() => reject(new Error(`Gemini streaming request timed out after ${timeoutMs}ms`)), timeoutMs)
+          setTimeout(
+            () =>
+              reject(
+                new Error(
+                  `Gemini streaming request timed out after ${timeoutMs}ms`,
+                ),
+              ),
+            timeoutMs,
+          ),
         ),
       ]);
 
       for await (const chunk of responseStream) {
-        const delta = typeof chunk.text === 'function' ? chunk.text() : chunk.text || '';
+        const delta =
+          typeof chunk.text === "function" ? chunk.text() : chunk.text || "";
         if (delta) {
           accumulated += delta;
-          if (typeof onToken === 'function') {
+          if (typeof onToken === "function") {
             onToken(delta);
           }
         }
@@ -677,14 +768,20 @@ async function callGemini({
           config: modelConfig,
         }),
         new Promise((_, reject) =>
-          setTimeout(() => reject(new Error(`Gemini request timed out after ${timeoutMs}ms`)), timeoutMs)
+          setTimeout(
+            () =>
+              reject(
+                new Error(`Gemini request timed out after ${timeoutMs}ms`),
+              ),
+            timeoutMs,
+          ),
         ),
       ]);
 
       accumulated =
         response.text?.trim() ||
         response.candidates?.[0]?.content?.parts?.[0]?.text ||
-        '';
+        "";
       rawUsage = response.usageMetadata;
     }
 
@@ -699,12 +796,14 @@ async function callGemini({
   } catch (primaryErr) {
     if (isTransientOrRateLimitError(primaryErr)) {
       console.warn(
-        `⚠️ [Orchestrator] Primary model (${PRIMARY_MODEL}) transient error: ${primaryErr.message}. Attempting fallback (${FALLBACK_MODEL})...`
+        `⚠️ [Orchestrator] Primary model (${PRIMARY_MODEL}) transient error: ${primaryErr.message}. Attempting fallback (${FALLBACK_MODEL})...`,
       );
       try {
         return await executeModel(FALLBACK_MODEL);
       } catch (fallbackErr) {
-        console.error(`❌ [Orchestrator] Fallback model (${FALLBACK_MODEL}) also failed: ${fallbackErr.message}`);
+        console.error(
+          `❌ [Orchestrator] Fallback model (${FALLBACK_MODEL}) also failed: ${fallbackErr.message}`,
+        );
         throw fallbackErr;
       }
     }
@@ -719,36 +818,36 @@ async function callGemini({
  * @returns {{ tool: string, args: Object } | null}
  */
 export function detectToolIntent(message) {
-  if (!message || typeof message !== 'string') return null;
+  if (!message || typeof message !== "string") return null;
   const text = message.toLowerCase().trim();
 
   // 1. Leave Balance Inquiry
   if (
     /leave\s+balance|how\s+many\s+(?:casual|sick|maternity)?\s*(?:days|leaves)\s+(?:do\s+i\s+have|remaining|left)/i.test(
-      text
+      text,
     )
   ) {
-    return { tool: 'getLeaveBalance', args: {} };
+    return { tool: "getLeaveBalance", args: {} };
   }
 
   // 2. Tickets Inquiry
   if (/(?:show|view|get|list|my)\s+(?:open\s+)?tickets/i.test(text)) {
-    const status = text.includes('open') ? 'OPEN' : 'ALL';
-    return { tool: 'getMyTickets', args: { status } };
+    const status = text.includes("open") ? "OPEN" : "ALL";
+    return { tool: "getMyTickets", args: { status } };
   }
 
   // 3. Apply Leave (Consequential / HITL)
   const leaveMatch = text.match(
-    /apply\s+(?:for\s+)?(\d+)\s+days?\s+(?:of\s+)?(casual|sick|maternity)\s+(?:leave\s+)?(?:starting|from)?\s*(\d{4}-\d{2}-\d{2})/i
+    /apply\s+(?:for\s+)?(\d+)\s+days?\s+(?:of\s+)?(casual|sick|maternity)\s+(?:leave\s+)?(?:starting|from)?\s*(\d{4}-\d{2}-\d{2})/i,
   );
   if (leaveMatch) {
     return {
-      tool: 'applyLeave',
+      tool: "applyLeave",
       args: {
         days: parseInt(leaveMatch[1], 10),
         leaveType: leaveMatch[2].toLowerCase(),
         startDate: leaveMatch[3],
-        reason: 'Requested via Copilot Chat',
+        reason: "Requested via Copilot Chat",
       },
     };
   }
@@ -758,19 +857,20 @@ export function detectToolIntent(message) {
     /request\s+(?:hardware|upgrade|new\s+laptop|new\s+monitor)/i.test(text) ||
     /upgrade\s+my\s+(?:laptop|hardware|monitor|workstation)/i.test(text)
   ) {
-    const assetType = text.includes('monitor') ? 'MONITOR' : 'LAPTOP';
-    let model = 'High-Performance Workstation';
-    if (text.includes('macbook')) model = 'MacBook Pro 16-inch M3 Max';
-    else if (text.includes('dell') || text.includes('xps')) model = 'Dell XPS 15 9530';
-    else if (text.includes('thinkpad')) model = 'ThinkPad T14 Gen 4';
+    const assetType = text.includes("monitor") ? "MONITOR" : "LAPTOP";
+    let model = "High-Performance Workstation";
+    if (text.includes("macbook")) model = "MacBook Pro 16-inch M3 Max";
+    else if (text.includes("dell") || text.includes("xps"))
+      model = "Dell XPS 15 9530";
+    else if (text.includes("thinkpad")) model = "ThinkPad T14 Gen 4";
 
     return {
-      tool: 'requestHardwareUpgrade',
+      tool: "requestHardwareUpgrade",
       args: {
         assetType,
         preferredModel: model,
-        reason: 'Requested via Copilot Chat',
-        urgency: 'MEDIUM',
+        reason: "Requested via Copilot Chat",
+        urgency: "MEDIUM",
       },
     };
   }
@@ -796,24 +896,20 @@ async function executeToolIntent({
   customEmbeddingProvider,
   qdrantClient,
 }) {
-  let text = '';
+  let text = "";
   let stagedAction = null;
 
   let toolResult;
   try {
-    toolResult = await executeTool(
-      detectedTool.tool,
-      detectedTool.args || {},
-      {
-        user,
-        redisClient,
-        embeddingProvider: customEmbeddingProvider,
-        qdrantClient,
-      }
-    );
+    toolResult = await executeTool(detectedTool.tool, detectedTool.args || {}, {
+      user,
+      redisClient,
+      embeddingProvider: customEmbeddingProvider,
+      qdrantClient,
+    });
   } catch (err) {
     return {
-      text: err.message || 'Unable to execute requested tool action.',
+      text: err.message || "Unable to execute requested tool action.",
       stagedAction: null,
     };
   }
@@ -828,22 +924,26 @@ async function executeToolIntent({
     text =
       toolResult.message ||
       `I have staged your ${toolResult.actionType} request. Please confirm or decline using the approval card below.`;
-  } else if (detectedTool.tool === 'getLeaveBalance') {
-    text = `Here are your current leave balances, ${toolResult.name || user.name || 'there'}:\n- Casual Leave: ${toolResult.leaveBalances.casual} days\n- Sick Leave: ${toolResult.leaveBalances.sick} days\n- Maternity Leave: ${toolResult.leaveBalances.maternity} days`;
-  } else if (detectedTool.tool === 'getMyTickets') {
+  } else if (detectedTool.tool === "getLeaveBalance") {
+    text = `Here are your current leave balances, ${toolResult.name || user.name || "there"}:\n- Casual Leave: ${toolResult.leaveBalances.casual} days\n- Sick Leave: ${toolResult.leaveBalances.sick} days\n- Maternity Leave: ${toolResult.leaveBalances.maternity} days`;
+  } else if (detectedTool.tool === "getMyTickets") {
     if (!toolResult.tickets || toolResult.tickets.length === 0) {
-      text = 'You currently have no open support tickets on record.';
+      text = "You currently have no open support tickets on record.";
     } else {
       const ticketLines = toolResult.tickets
         .slice(0, 5)
-        .map((t) => `- [${t.ticketId}] (${t.status}) ${t.title} [${t.priority} Priority]`)
-        .join('\n');
+        .map(
+          (t) =>
+            `- [${t.ticketId}] (${t.status}) ${t.title} [${t.priority} Priority]`,
+        )
+        .join("\n");
       text = `Here are your recent tickets:\n${ticketLines}`;
     }
-  } else if (detectedTool.tool === 'createTicket') {
+  } else if (detectedTool.tool === "createTicket") {
     text = `Support Ticket **${toolResult.ticket.ticketId}** has been opened successfully under category **${toolResult.ticket.category}** with **${toolResult.ticket.priority}** priority.`;
   } else {
-    text = typeof toolResult === 'string' ? toolResult : JSON.stringify(toolResult);
+    text =
+      typeof toolResult === "string" ? toolResult : JSON.stringify(toolResult);
   }
 
   return { text, stagedAction };
@@ -873,7 +973,9 @@ async function finalizeTurn({
   redisClient = getRedisClient(),
 }) {
   // 1. Post-LLM De-Tokenization: Restore sensitive surrogate tokens
-  const unmaskedAnswer = hasPII ? unmaskPII(rawAnswerText, tokenMap) : rawAnswerText;
+  const unmaskedAnswer = hasPII
+    ? unmaskPII(rawAnswerText, tokenMap)
+    : rawAnswerText;
 
   // 2. Package Citations
   const packaged = packageResponseWithCitations({
@@ -889,8 +991,18 @@ async function finalizeTurn({
     userId: user?.userId,
   };
 
-  await appendSessionMessage(sessionTarget, { role: 'user', text: rawMessage }, redisClient, user);
-  await appendSessionMessage(sessionTarget, { role: 'model', text: unmaskedAnswer }, redisClient, user);
+  await appendSessionMessage(
+    sessionTarget,
+    { role: "user", text: rawMessage },
+    redisClient,
+    user,
+  );
+  await appendSessionMessage(
+    sessionTarget,
+    { role: "model", text: unmaskedAnswer },
+    redisClient,
+    user,
+  );
 
   // 4. Record Audit Log
   if (user?.orgId) {
@@ -899,22 +1011,26 @@ async function finalizeTurn({
       actor: {
         userId: user.userId,
         name: user.name || user.userId,
-        role: user.role || 'employee',
+        role: user.role || "employee",
       },
-      action: detectedTool ? `COPILOT_TURN:${detectedTool.tool}` : 'COPILOT_TURN:RAG_SEARCH',
+      action: detectedTool
+        ? `COPILOT_TURN:${detectedTool.tool}`
+        : "COPILOT_TURN:RAG_SEARCH",
       entity: {
-        type: 'copilot_session',
+        type: "copilot_session",
         id: sessionId,
       },
       changes: {
         after: {
-          detectedTool: detectedTool?.tool || 'searchPolicies',
+          detectedTool: detectedTool?.tool || "searchPolicies",
           hasCitations: packaged.hasCitations,
           hasActionRequired: Boolean(stagedAction),
         },
       },
     }).catch((err) => {
-      console.error(`🚨 [AuditLog] Failed to record audit log for copilot turn (session: ${sessionId}): ${err.message}`);
+      console.error(
+        `🚨 [AuditLog] Failed to record audit log for copilot turn (session: ${sessionId}): ${err.message}`,
+      );
     });
   }
 
@@ -957,13 +1073,15 @@ export async function runCopilotTurn({
   redisClient = getRedisClient(),
 }) {
   if (!sessionId) {
-    throw new Error('sessionId is required for copilot conversation.');
+    throw new Error("sessionId is required for copilot conversation.");
   }
-  if (!message || typeof message !== 'string' || message.trim().length === 0) {
-    throw new Error('User message is required.');
+  if (!message || typeof message !== "string" || message.trim().length === 0) {
+    throw new Error("User message is required.");
   }
   if (!user || !user.orgId || !user.userId) {
-    throw new Error('Authenticated user context with orgId and userId is required.');
+    throw new Error(
+      "Authenticated user context with orgId and userId is required.",
+    );
   }
 
   // 1. Validate Session Ownership & Isolation
@@ -974,11 +1092,15 @@ export async function runCopilotTurn({
 
   // 3. Load Multi-Turn History (scoped by orgId + userId + sessionId)
   const sessionTarget = { sessionId, orgId: user.orgId, userId: user.userId };
-  const historyTurns = await getSessionHistory(sessionTarget, redisClient, user);
+  const historyTurns = await getSessionHistory(
+    sessionTarget,
+    redisClient,
+    user,
+  );
 
   // 3. Tool Intent Evaluation
   const detectedTool = detectToolIntent(message);
-  if (detectedTool && detectedTool.tool !== 'searchPolicies') {
+  if (detectedTool && detectedTool.tool !== "searchPolicies") {
     const { text, stagedAction } = await executeToolIntent({
       detectedTool,
       user,
@@ -1017,10 +1139,10 @@ export async function runCopilotTurn({
     evidenceContext: retrievalResult.contextBlock,
   });
 
-  let responseText = '';
+  let responseText = "";
   let usageMetadata = null;
 
-  if (typeof customLlmProvider === 'function') {
+  if (typeof customLlmProvider === "function") {
     responseText = await customLlmProvider({
       message: maskedText,
       history: historyTurns,
@@ -1040,7 +1162,10 @@ export async function runCopilotTurn({
   }
 
   // Ungrounded fallback check
-  if (!retrievalResult.isGrounded && (!responseText || responseText.length < 5)) {
+  if (
+    !retrievalResult.isGrounded &&
+    (!responseText || responseText.length < 5)
+  ) {
     responseText = retrievalResult.fallbackMessage;
   }
 
@@ -1095,16 +1220,18 @@ export async function streamCopilotTurn({
   explicitToolCall = null,
 }) {
   if (!sessionId) {
-    throw new Error('sessionId is required for copilot conversation.');
+    throw new Error("sessionId is required for copilot conversation.");
   }
-  if (!message || typeof message !== 'string' || message.trim().length === 0) {
-    throw new Error('User message is required.');
+  if (!message || typeof message !== "string" || message.trim().length === 0) {
+    throw new Error("User message is required.");
   }
   if (!user || !user.orgId || !user.userId) {
-    throw new Error('Authenticated user context with orgId and userId is required.');
+    throw new Error(
+      "Authenticated user context with orgId and userId is required.",
+    );
   }
-  if (typeof onEvent !== 'function') {
-    throw new Error('onEvent callback function is required for SSE streaming.');
+  if (typeof onEvent !== "function") {
+    throw new Error("onEvent callback function is required for SSE streaming.");
   }
 
   // 1. Validate Session Ownership & Isolation
@@ -1115,9 +1242,13 @@ export async function streamCopilotTurn({
 
   // 3. Load Multi-Turn History (scoped by orgId + userId + sessionId)
   const sessionTarget = { sessionId, orgId: user.orgId, userId: user.userId };
-  const historyTurns = await getSessionHistory(sessionTarget, redisClient, user);
+  const historyTurns = await getSessionHistory(
+    sessionTarget,
+    redisClient,
+    user,
+  );
 
-  let accumulatedText = '';
+  let accumulatedText = "";
   let stagedActionPayload = null;
   let usageMetadata = null;
   let chunks = [];
@@ -1127,8 +1258,8 @@ export async function streamCopilotTurn({
   // 3. Tool Intent Evaluation
   const detectedTool = explicitToolCall || detectToolIntent(message);
 
-  if (detectedTool && detectedTool.tool !== 'searchPolicies') {
-    onEvent('tool_call', {
+  if (detectedTool && detectedTool.tool !== "searchPolicies") {
+    onEvent("tool_call", {
       tool: detectedTool.tool,
       status: `Executing: ${detectedTool.tool}...`,
       timestamp: new Date().toISOString(),
@@ -1147,19 +1278,19 @@ export async function streamCopilotTurn({
       accumulatedText = text;
 
       if (stagedActionPayload) {
-        onEvent('action_required', stagedActionPayload);
+        onEvent("action_required", stagedActionPayload);
       }
 
-      onEvent('token', { delta: accumulatedText });
+      onEvent("token", { delta: accumulatedText });
     } catch (toolErr) {
       accumulatedText = `⚠️ Error executing ${detectedTool.tool}: ${toolErr.message}`;
-      onEvent('token', { delta: accumulatedText });
+      onEvent("token", { delta: accumulatedText });
     }
   } else {
     // 4. Semantic Policy Search (Evidence-Based RAG)
-    onEvent('tool_call', {
-      tool: 'searchPolicies',
-      status: 'Searching ABC Tech policy knowledge base in Qdrant...',
+    onEvent("tool_call", {
+      tool: "searchPolicies",
+      status: "Searching ABC Tech policy knowledge base in Qdrant...",
       timestamp: new Date().toISOString(),
     });
 
@@ -1176,11 +1307,11 @@ export async function streamCopilotTurn({
 
     const systemInstruction = buildSystemInstructions({
       user,
-      evidenceContext: retrievalResult?.contextBlock || '',
+      evidenceContext: retrievalResult?.contextBlock || "",
     });
 
     // 5. Generate stream from LLM
-    if (typeof customLlmStreamProvider === 'function') {
+    if (typeof customLlmStreamProvider === "function") {
       await customLlmStreamProvider({
         message: maskedText,
         history: historyTurns,
@@ -1189,12 +1320,14 @@ export async function streamCopilotTurn({
         tokenMap,
         emitToken: (delta) => {
           accumulatedText += delta;
-          onEvent('token', { delta });
+          onEvent("token", { delta });
         },
       });
     } else {
       const contents = formatGeminiContents(historyTurns, maskedText);
-      console.log(`📡 [Orchestrator] Invoking Gemini API (Primary: ${PRIMARY_MODEL})...`);
+      console.log(
+        `📡 [Orchestrator] Invoking Gemini API (Primary: ${PRIMARY_MODEL})...`,
+      );
 
       const geminiResult = await callGemini({
         contents,
@@ -1202,7 +1335,7 @@ export async function streamCopilotTurn({
         stream: true,
         onToken: (delta) => {
           accumulatedText += delta;
-          onEvent('token', { delta });
+          onEvent("token", { delta });
         },
       });
 
@@ -1229,14 +1362,14 @@ export async function streamCopilotTurn({
   });
 
   // 7. Emit Citation Drawer Event
-  onEvent('citation', {
+  onEvent("citation", {
     hasCitations: finalSummary.hasCitations,
     citations: finalSummary.citations,
     activeCitations: finalSummary.activeCitations,
   });
 
   // 8. Emit Done Event
-  onEvent('done', {
+  onEvent("done", {
     sessionId,
     totalHistoryTurns: finalSummary.totalHistoryTurns,
     hasCitations: finalSummary.hasCitations,
