@@ -1,7 +1,16 @@
+import crypto from 'node:crypto';
 import mongoose from 'mongoose';
 
 const auditLogSchema = new mongoose.Schema(
   {
+    logId: {
+      type: String,
+      required: true,
+      unique: true,
+      default: () => `log_${crypto.randomUUID()}`,
+      trim: true,
+      index: true,
+    },
     orgId: {
       type: String,
       required: true,

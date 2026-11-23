@@ -25,10 +25,14 @@ import { recordAuditLog } from '../services/audit/audit.service.js';
  * POST /api/copilot/chat
  */
 export async function streamChat(req, res, next) {
+  const startTime = Date.now();
   const { message, sessionId, toolCall } = req.body;
   const user = req.user;
 
+  console.log(`\n💬 [Copilot Controller] Processing chat stream request...`);
+
   if (!user || !user.orgId) {
+    console.warn(`⚠️ [Copilot Controller] Request rejected: missing user credentials or orgId.`);
     return errorResponse(res, {
       statusCode: 401,
       message: 'Unauthorized: Valid user credentials required.',
@@ -36,6 +40,7 @@ export async function streamChat(req, res, next) {
   }
 
   if (!message || typeof message !== 'string' || message.trim().length === 0) {
+    console.warn(`⚠️ [Copilot Controller] Request rejected: empty or invalid message string.`);
     return errorResponse(res, {
       statusCode: 400,
       message: 'Message text is required.',
@@ -46,13 +51,17 @@ export async function streamChat(req, res, next) {
     ? sessionId.trim()
     : `sess_${user.userId}`;
 
+  console.log(`🔒 [Copilot Controller] Validating session ownership for session: '${activeSessionId}' (User: ${user.userId}, Org: ${user.orgId})...`);
+
   // Validate session ownership before establishing SSE connection to fail fast with 403
   try {
     await validateSessionOwnership({
       sessionId: activeSessionId,
       user,
     });
+    console.log(`✅ [Copilot Controller] Session ownership validated successfully.`);
   } catch (err) {
+    console.error(`🚨 [Copilot Controller] Session ownership validation failed: ${err.message}`);
     if (err instanceof SessionOwnershipError || err.statusCode === 403) {
       return errorResponse(res, {
         statusCode: 403,
@@ -68,16 +77,20 @@ export async function streamChat(req, res, next) {
 
   const msgLength = message.trim().length;
   console.log(
-    `\n💬 [Copilot Chat] Turn started | Org: ${user.orgId} | User: ${user.userId} | Role: ${user.role} | Session: ${activeSessionId} | Length: ${msgLength} chars`
+    `💬 [Copilot Controller] Turn started | Org: ${user.orgId} | User: ${user.userId} | Role: ${user.role} | Session: ${activeSessionId} | Length: ${msgLength} chars | ToolCall: ${toolCall ? JSON.stringify(toolCall) : 'none'}`
   );
 
   // Initialize SSE connection headers
   initSSE(res);
+  console.log(`📡 [Copilot Controller] SSE headers initialized successfully.`);
 
   let isAborted = false;
+  let tokenCount = 0;
+  let firstTokenLatency = null;
+
   req.on('close', () => {
     isAborted = true;
-    console.log(`⚠️  [Copilot Chat] Client disconnected / aborted SSE connection for session: ${activeSessionId}`);
+    console.log(`⚠️  [Copilot Controller] Client disconnected / aborted SSE connection for session: ${activeSessionId}`);
   });
 
   try {
@@ -87,8 +100,22 @@ export async function streamChat(req, res, next) {
       user,
       onEvent: (event, data) => {
         if (!isAborted) {
-          if (event !== 'token') {
-            console.log(`\n📡 [SSE Event: ${event}]`);
+          if (event === 'token') {
+            tokenCount++;
+            if (firstTokenLatency === null) {
+              firstTokenLatency = Date.now() - startTime;
+              console.log(`⚡ [Copilot Controller:SSE] First token emitted (${firstTokenLatency}ms from request start)`);
+            }
+          } else if (event === 'tool_call') {
+            console.log(`🛠️  [Copilot Controller:SSE] Event: 'tool_call' -> ${data?.tool}: ${data?.status}`);
+          } else if (event === 'action_required') {
+            console.log(`⚠️  [Copilot Controller:SSE] Event: 'action_required' -> StagedActionId: ${data?.actionId}, Type: ${data?.type}`);
+          } else if (event === 'citation') {
+            console.log(`📚 [Copilot Controller:SSE] Event: 'citation' -> Citations count: ${data?.citations?.length || 0}`);
+          } else if (event === 'done') {
+            console.log(`🏁 [Copilot Controller:SSE] Event: 'done' -> Total Tokens: ${tokenCount}, History Turns: ${data?.totalHistoryTurns}`);
+          } else {
+            console.log(`📡 [Copilot Controller:SSE] Event: '${event}' ->`, JSON.stringify(data));
           }
           sendSSE(res, event, data);
         }
@@ -96,7 +123,12 @@ export async function streamChat(req, res, next) {
       explicitToolCall: toolCall || null,
     });
   } catch (err) {
-    console.error(`\n❌ [Copilot Chat] Error during stream:`, err.message);
+    console.error(`\n❌ [Copilot Controller] Error during stream:`, {
+      message: err.message,
+      name: err.name,
+      statusCode: err.statusCode,
+      stack: err.stack,
+    });
     if (!res.headersSent) {
       const statusCode = (err instanceof SessionOwnershipError || err.statusCode === 403) ? 403 : 500;
       return errorResponse(res, {
@@ -110,7 +142,8 @@ export async function streamChat(req, res, next) {
       code: 'COPILOT_STREAM_ERROR',
     });
   } finally {
-    console.log(`\n🏁 [Copilot Chat] Stream completed & closed for session: ${activeSessionId}\n`);
+    const totalElapsed = Date.now() - startTime;
+    console.log(`\n🏁 [Copilot Controller] Stream completed & closed for session: ${activeSessionId} | Total Tokens: ${tokenCount} | Elapsed: ${totalElapsed}ms\n`);
     closeSSE(res);
   }
 }

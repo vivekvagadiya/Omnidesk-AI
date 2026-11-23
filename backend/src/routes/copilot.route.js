@@ -28,7 +28,18 @@ router.use(authenticateJwt);
  * @desc    Stream Copilot chat responses via Server-Sent Events (SSE)
  * @access  Private (All Roles)
  */
-router.post("/chat", streamChat);
+router.post("/chat", (req, res, next) => {
+  const reqTime = new Date().toISOString();
+  console.log(`\n================================================================================`);
+  console.log(`🚀 [Copilot Route] POST /api/copilot/chat received at ${reqTime}`);
+  console.log(`   Client IP: ${req.ip || req.socket?.remoteAddress || 'unknown'}`);
+  console.log(`   User: ${req.user?.userId || 'anonymous'} (Org: ${req.user?.orgId || 'none'}, Role: ${req.user?.role || 'none'}, Dept: ${req.user?.department || 'none'})`);
+  console.log(`   SessionId: ${req.body?.sessionId || '(auto-generated)'}`);
+  console.log(`   Message Length: ${req.body?.message?.length || 0} chars`);
+  console.log(`   Explicit ToolCall: ${req.body?.toolCall ? JSON.stringify(req.body.toolCall) : 'none'}`);
+  console.log(`================================================================================`);
+  return streamChat(req, res, next);
+});
 
 /**
  * @route   POST /api/copilot/action/approve

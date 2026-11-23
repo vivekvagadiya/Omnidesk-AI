@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { GoogleGenAI } from "@google/genai";
 import { config } from "../../config/environment.js";
 import { getRedisClient } from "../../config/redis.js";
@@ -1007,6 +1008,7 @@ async function finalizeTurn({
   // 4. Record Audit Log
   if (user?.orgId) {
     recordAuditLog({
+      logId: `log_${crypto.randomUUID()}`,
       orgId: user.orgId,
       actor: {
         userId: user.userId,
@@ -1219,34 +1221,47 @@ export async function streamCopilotTurn({
   redisClient = getRedisClient(),
   explicitToolCall = null,
 }) {
+  const turnStartTime = Date.now();
+  console.log(`\n▶️ [Orchestrator:streamCopilotTurn] Initializing turn for session: '${sessionId}' | User: ${user?.userId} (${user?.role}) | Org: ${user?.orgId}`);
+
   if (!sessionId) {
+    console.error(`❌ [Orchestrator:streamCopilotTurn] Missing sessionId.`);
     throw new Error("sessionId is required for copilot conversation.");
   }
   if (!message || typeof message !== "string" || message.trim().length === 0) {
+    console.error(`❌ [Orchestrator:streamCopilotTurn] Missing user message.`);
     throw new Error("User message is required.");
   }
   if (!user || !user.orgId || !user.userId) {
+    console.error(`❌ [Orchestrator:streamCopilotTurn] Incomplete user context:`, user);
     throw new Error(
       "Authenticated user context with orgId and userId is required.",
     );
   }
   if (typeof onEvent !== "function") {
+    console.error(`❌ [Orchestrator:streamCopilotTurn] Missing onEvent callback.`);
     throw new Error("onEvent callback function is required for SSE streaming.");
   }
 
   // 1. Validate Session Ownership & Isolation
+  console.log(`  [Step 1/6] Validating session ownership in orchestrator...`);
   await validateSessionOwnership({ sessionId, user, client: redisClient });
+  console.log(`  [Step 1/6] Session ownership validated.`);
 
   // 2. Pre-LLM PII Masking
+  console.log(`  [Step 2/6] Running PII masking on input prompt...`);
   const { maskedText, tokenMap, hasPII } = maskPII(message);
+  console.log(`  [Step 2/6] PII masking complete. hasPII: ${hasPII}, entities masked: ${Object.keys(tokenMap).length}`);
 
   // 3. Load Multi-Turn History (scoped by orgId + userId + sessionId)
+  console.log(`  [Step 3/6] Loading sliding-window session history from Redis...`);
   const sessionTarget = { sessionId, orgId: user.orgId, userId: user.userId };
   const historyTurns = await getSessionHistory(
     sessionTarget,
     redisClient,
     user,
   );
+  console.log(`  [Step 3/6] Retrieved ${historyTurns.length} history turn(s).`);
 
   let accumulatedText = "";
   let stagedActionPayload = null;
@@ -1255,10 +1270,12 @@ export async function streamCopilotTurn({
   let isGrounded = true;
   let suggestedAction = null;
 
-  // 3. Tool Intent Evaluation
+  // 4. Tool Intent Evaluation
   const detectedTool = explicitToolCall || detectToolIntent(message);
+  console.log(`  [Step 4/6] Intent Detection result: ${detectedTool ? `${detectedTool.tool} (explicit: ${Boolean(explicitToolCall)})` : 'None -> RAG Policy Search'}`);
 
   if (detectedTool && detectedTool.tool !== "searchPolicies") {
+    console.log(`  [Step 4/6] Executing tool intent '${detectedTool.tool}' with args:`, JSON.stringify(detectedTool.args || {}));
     onEvent("tool_call", {
       tool: detectedTool.tool,
       status: `Executing: ${detectedTool.tool}...`,
@@ -1266,6 +1283,7 @@ export async function streamCopilotTurn({
     });
 
     try {
+      const toolStartTime = Date.now();
       const { text, stagedAction } = await executeToolIntent({
         detectedTool,
         user,
@@ -1276,26 +1294,32 @@ export async function streamCopilotTurn({
 
       stagedActionPayload = stagedAction;
       accumulatedText = text;
+      console.log(`  [Step 4/6] Tool '${detectedTool.tool}' executed in ${Date.now() - toolStartTime}ms | Result length: ${text?.length || 0} | StagedAction: ${stagedAction ? stagedAction.actionId : 'none'}`);
 
       if (stagedActionPayload) {
+        console.log(`  [Step 4/6] Staged action generated: ${stagedActionPayload.actionId} (${stagedActionPayload.type})`);
         onEvent("action_required", stagedActionPayload);
       }
 
       onEvent("token", { delta: accumulatedText });
     } catch (toolErr) {
+      console.error(`❌ [Orchestrator:streamCopilotTurn] Tool execution error (${detectedTool.tool}):`, toolErr.message);
       accumulatedText = `⚠️ Error executing ${detectedTool.tool}: ${toolErr.message}`;
       onEvent("token", { delta: accumulatedText });
     }
   } else {
     // 4. Semantic Policy Search (Evidence-Based RAG)
+    const ragQuery = (detectedTool && detectedTool.args?.query) || maskedText;
+    console.log(`  [Step 4/6] Starting Qdrant RAG policy retrieval for query: "${ragQuery.substring(0, 80)}..."`);
     onEvent("tool_call", {
       tool: "searchPolicies",
       status: "Searching ABC Tech policy knowledge base in Qdrant...",
       timestamp: new Date().toISOString(),
     });
 
+    const ragStartTime = Date.now();
     const retrievalResult = await retrievePolicyContext({
-      query: (detectedTool && detectedTool.args?.query) || maskedText,
+      query: ragQuery,
       user,
       embeddingProvider: customEmbeddingProvider,
       qdrantClient,
@@ -1305,13 +1329,23 @@ export async function streamCopilotTurn({
     isGrounded = retrievalResult?.isGrounded ?? false;
     suggestedAction = retrievalResult?.suggestedAction || null;
 
+    console.log(`  [Step 4/6] Qdrant search completed in ${Date.now() - ragStartTime}ms | Chunks: ${chunks.length} | Grounded: ${isGrounded} | Highest Score: ${retrievalResult?.highestScore ?? 0}`);
+    if (chunks.length > 0) {
+      console.log(`  [Step 4/6] Top sources: ${chunks.slice(0, 3).map(c => `[${c.documentName || 'Policy'} § ${c.sectionTitle || 'General'} (${((c.score || 0) * 100).toFixed(0)}%)]`).join(', ')}`);
+    }
+
     const systemInstruction = buildSystemInstructions({
       user,
       evidenceContext: retrievalResult?.contextBlock || "",
     });
 
     // 5. Generate stream from LLM
+    console.log(`  [Step 5/6] Generating response with LLM (Model: ${PRIMARY_MODEL}, Streaming: true)...`);
+    const llmStartTime = Date.now();
+    let streamTokenCount = 0;
+
     if (typeof customLlmStreamProvider === "function") {
+      console.log(`  [Step 5/6] Using custom mock LLM stream provider.`);
       await customLlmStreamProvider({
         message: maskedText,
         history: historyTurns,
@@ -1320,14 +1354,13 @@ export async function streamCopilotTurn({
         tokenMap,
         emitToken: (delta) => {
           accumulatedText += delta;
+          streamTokenCount++;
           onEvent("token", { delta });
         },
       });
     } else {
       const contents = formatGeminiContents(historyTurns, maskedText);
-      console.log(
-        `📡 [Orchestrator] Invoking Gemini API (Primary: ${PRIMARY_MODEL})...`,
-      );
+      console.log(`  [Step 5/6] Formatted ${contents.length} contents item(s) for Gemini.`);
 
       const geminiResult = await callGemini({
         contents,
@@ -1335,15 +1368,22 @@ export async function streamCopilotTurn({
         stream: true,
         onToken: (delta) => {
           accumulatedText += delta;
+          streamTokenCount++;
           onEvent("token", { delta });
         },
       });
 
       usageMetadata = geminiResult.usageMetadata;
     }
+
+    console.log(`  [Step 5/6] LLM generation complete in ${Date.now() - llmStartTime}ms | Streamed ${streamTokenCount} token chunk(s) | Output: ${accumulatedText.length} chars`);
+    if (usageMetadata) {
+      console.log(`  [Step 5/6] Token usage: promptTokens=${usageMetadata.promptTokenCount}, candidateTokens=${usageMetadata.candidatesTokenCount}`);
+    }
   }
 
   // 6. Finalize Turn
+  console.log(`  [Step 6/6] Finalizing turn, unmasking PII, recording audit log, and persisting to Redis...`);
   const finalSummary = await finalizeTurn({
     sessionId,
     user,
@@ -1361,6 +1401,8 @@ export async function streamCopilotTurn({
     redisClient,
   });
 
+  console.log(`  [Step 6/6] Turn finalized | Citations: ${finalSummary.citations?.length || 0} | Grounded: ${finalSummary.isGrounded}`);
+
   // 7. Emit Citation Drawer Event
   onEvent("citation", {
     hasCitations: finalSummary.hasCitations,
@@ -1377,6 +1419,8 @@ export async function streamCopilotTurn({
     completedAt: new Date().toISOString(),
     usage: usageMetadata || undefined,
   });
+
+  console.log(`✅ [Orchestrator:streamCopilotTurn] Turn successfully finished in ${Date.now() - turnStartTime}ms for session: '${sessionId}'\n`);
 
   return finalSummary;
 }

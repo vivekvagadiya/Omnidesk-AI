@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { AuditLog } from '../../models/AuditLog.model.js';
 import { User } from '../../models/User.model.js';
 
@@ -130,6 +131,7 @@ export function toAuditLogDTO(log, role = 'employee') {
  * @returns {Promise<Object>} Created AuditLog document
  */
 export async function recordAuditLog({
+  logId,
   orgId,
   actor,
   actorId,
@@ -181,6 +183,7 @@ export async function recordAuditLog({
   const resolvedMetadata = metadata ? redactSensitiveData(metadata) : {};
 
   const entry = {
+    logId: logId || `log_${crypto.randomUUID()}`,
     orgId: orgId.trim(),
     actor: resolvedActor,
     action: action.trim(),

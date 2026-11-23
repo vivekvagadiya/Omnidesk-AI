@@ -21,6 +21,23 @@ export async function connectDB() {
     isConnected = true;
     console.log(`🍃 [MongoDB] Connected successfully to host: ${conn.connection.host} (${conn.connection.name})`);
 
+    // Auto-heal any legacy audit log documents with null logId to prevent E11000 duplicate key errors
+    try {
+      const auditCol = conn.connection.db.collection('auditlogs');
+      const nullDocs = await auditCol.find({ logId: null }).toArray();
+      if (nullDocs.length > 0) {
+        for (const doc of nullDocs) {
+          await auditCol.updateOne(
+            { _id: doc._id },
+            { $set: { logId: `log_${doc._id.toString()}` } }
+          );
+        }
+        console.log(`🍃 [MongoDB] Auto-healed ${nullDocs.length} audit log(s) with missing logId.`);
+      }
+    } catch {
+      // Non-fatal if collection is not yet created
+    }
+
     mongoose.connection.on('error', (err) => {
       console.error('🍃 [MongoDB] Connection runtime error:', err.message);
     });
