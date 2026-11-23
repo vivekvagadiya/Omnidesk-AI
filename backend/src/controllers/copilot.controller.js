@@ -66,8 +66,10 @@ export async function streamChat(req, res, next) {
     });
   }
 
-  console.log(`\n💬 [Copilot Chat] User: ${user.name || user.userId} (${user.role}) | Session: ${activeSessionId}`);
-  console.log(`💬 [Copilot Chat] Prompt: "${message.trim()}"`);
+  const msgLength = message.trim().length;
+  console.log(
+    `\n💬 [Copilot Chat] Turn started | Org: ${user.orgId} | User: ${user.userId} | Role: ${user.role} | Session: ${activeSessionId} | Length: ${msgLength} chars`
+  );
 
   // Initialize SSE connection headers
   initSSE(res);
@@ -85,10 +87,8 @@ export async function streamChat(req, res, next) {
       user,
       onEvent: (event, data) => {
         if (!isAborted) {
-          if (event === 'token') {
-            process.stdout.write(data?.delta || '');
-          } else {
-            console.log(`\n📡 [SSE Event: ${event}]`, typeof data === 'object' ? JSON.stringify(data).substring(0, 120) : data);
+          if (event !== 'token') {
+            console.log(`\n📡 [SSE Event: ${event}]`);
           }
           sendSSE(res, event, data);
         }

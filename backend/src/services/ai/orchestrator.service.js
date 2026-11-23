@@ -30,8 +30,8 @@ const REQUEST_TIMEOUT_MS = 25000; // 25 seconds timeout for LLM generation
  *    audit logs, notifications).
  *
  * In production (NODE_ENV === 'production'), Redis is the required distributed storage.
- * If Redis becomes unavailable, the system logs prominent error alerts and operates in a
- * degraded process-local mode with these documented limitations.
+ * If Redis becomes unavailable, the system returns a controlled 503 Service Unavailable error;
+ * in-memory fallback is strictly restricted to development and test environments.
  */
 const inMemorySessionStore = new Map();
 
@@ -78,6 +78,31 @@ export class SessionOwnershipError extends Error {
 }
 
 /**
+ * Atomic Redis Lua script to verify session ownership and delete the owner key and scoped
+ * messages atomically. Prevents race conditions and guarantees another user's session cannot be cleared.
+ */
+const ATOMIC_CLEAR_SESSION_LUA = `
+local ownerRaw = redis.call("get", KEYS[1])
+if not ownerRaw then
+  if KEYS[2] and KEYS[2] ~= "" then
+    redis.call("del", KEYS[2])
+  end
+  return 1
+end
+
+local ok, owner = pcall(cjson.decode, ownerRaw)
+if ok and owner and owner.orgId == ARGV[1] and owner.userId == ARGV[2] then
+  redis.call("del", KEYS[1])
+  if KEYS[2] and KEYS[2] ~= "" then
+    redis.call("del", KEYS[2])
+  end
+  return 1
+else
+  return -1
+end
+`;
+
+/**
  * Build the canonical scoped Redis key for session message history
  * Scoped by orgId + userId + sessionId:
  * `session:${orgId}:${userId}:${sessionId}:messages`
@@ -93,6 +118,11 @@ export function buildSessionKey({ orgId, userId, sessionId }) {
   const cleanSessionId = String(sessionId).trim();
   if (orgId && userId) {
     return `session:${String(orgId).trim()}:${String(userId).trim()}:${cleanSessionId}:messages`;
+  }
+  if (config.nodeEnv === 'production') {
+    throw new SessionOwnershipError(
+      'Cannot build unscoped session key: orgId and userId are strictly required in production.'
+    );
   }
   return `session:${cleanSessionId}:messages`;
 }
@@ -112,6 +142,14 @@ export async function resolveSessionKey(target, user = null, client = null) {
     const sessionId = target.sessionId || target.id;
     const orgId = target.orgId || target.user?.orgId || user?.orgId;
     const userId = target.userId || target.user?.userId || user?.userId;
+    if (orgId && userId && sessionId) {
+      return buildSessionKey({ orgId, userId, sessionId });
+    }
+    if (config.nodeEnv === 'production') {
+      throw new SessionOwnershipError(
+        'Cannot resolve session key: orgId and userId are strictly required in production.'
+      );
+    }
     return buildSessionKey({ orgId, userId, sessionId });
   }
 
@@ -127,7 +165,7 @@ export async function resolveSessionKey(target, user = null, client = null) {
   }
 
   // Check Redis ownership registry
-  if (client && client.isOpen) {
+  if (client && (client.isReady || client.isOpen)) {
     try {
       const rawOwner = await client.get(`session:owner:${cleanSessionId}`);
       if (rawOwner) {
@@ -137,8 +175,14 @@ export async function resolveSessionKey(target, user = null, client = null) {
         }
       }
     } catch {
-      // Fall through to legacy/unbound key
+      // Fall through to error in production or dev fallback
     }
+  }
+
+  if (config.nodeEnv === 'production') {
+    throw new SessionOwnershipError(
+      `Cannot resolve session key for '${cleanSessionId}': orgId and userId are strictly required in production.`
+    );
   }
 
   return `session:${cleanSessionId}:messages`;
@@ -354,26 +398,70 @@ export async function appendSessionMessage(sessionTarget, message, client = getR
 }
 
 /**
- * Clear conversation history for a session
+ * Clear conversation history for a session with atomic ownership verification.
+ * Validates authenticated orgId and userId, verifies ownership in Redis atomically,
+ * and expunges both the session owner record and scoped message list.
+ * Prevents an unverified caller from clearing another user's session.
  *
- * @param {string|Object} sessionTarget
- * @param {Object} [client]
- * @param {Object} [user]
+ * @param {string|Object} sessionTarget Session ID string or { sessionId, orgId, userId }
+ * @param {Object} [client] Redis client
+ * @param {Object} [user] Authenticated user object { orgId, userId }
  */
 export async function clearSessionHistory(sessionTarget, client = getRedisClient(), user = null) {
   if (!sessionTarget) return;
 
-  const key = await resolveSessionKey(sessionTarget, user, client);
-  const sessionId = typeof sessionTarget === 'object' && sessionTarget !== null
+  const rawSessionId = typeof sessionTarget === 'object' && sessionTarget !== null
     ? (sessionTarget.sessionId || sessionTarget.id)
     : sessionTarget;
-  const ownerKey = sessionId ? `session:owner:${String(sessionId).trim()}` : null;
 
-  if (client && client.isOpen) {
+  if (!rawSessionId || typeof rawSessionId !== 'string') return;
+  const cleanSessionId = rawSessionId.trim();
+
+  const orgId = typeof sessionTarget === 'object' && sessionTarget !== null
+    ? (sessionTarget.orgId || sessionTarget.user?.orgId || user?.orgId)
+    : user?.orgId;
+  const userId = typeof sessionTarget === 'object' && sessionTarget !== null
+    ? (sessionTarget.userId || sessionTarget.user?.userId || user?.userId)
+    : user?.userId;
+
+  // In production, authenticated orgId and userId are strictly required
+  if (!orgId || !userId) {
+    if (config.nodeEnv === 'production') {
+      throw new SessionOwnershipError('Cannot clear session history: orgId and userId are strictly required in production.');
+    }
+    // Dev/test backward compatibility: delete unscoped test key without touching ownership registry
+    const legacyKey = `session:${cleanSessionId}:messages`;
+    if (client && (client.isReady || client.isOpen)) {
+      try {
+        await client.del(legacyKey);
+      } catch (err) {
+        console.warn(`⚠️ [Orchestrator] Redis legacy session delete error: ${err.message}`);
+      }
+    }
+    inMemorySessionStore.delete(legacyKey);
+    return;
+  }
+
+  const cleanOrgId = String(orgId).trim();
+  const cleanUserId = String(userId).trim();
+  const ownerKey = `session:owner:${cleanSessionId}`;
+  const historyKey = buildSessionKey({ orgId: cleanOrgId, userId: cleanUserId, sessionId: cleanSessionId });
+
+  // 1. Primary path: Atomic Lua check-and-delete in Redis
+  if (client && (client.isReady || client.isOpen)) {
     try {
-      if (key) await client.del(key);
-      if (ownerKey) await client.del(ownerKey);
+      const result = await client.eval(ATOMIC_CLEAR_SESSION_LUA, {
+        keys: [ownerKey, historyKey],
+        arguments: [cleanOrgId, cleanUserId],
+      });
+
+      if (result === -1) {
+        throw new SessionOwnershipError(
+          `Forbidden: Session '${cleanSessionId}' does not belong to the authenticated user.`
+        );
+      }
     } catch (err) {
+      if (err instanceof SessionOwnershipError) throw err;
       if (config.nodeEnv === 'production') {
         const serviceErr = new Error(`Service Unavailable: Redis session delete error - ${err.message}`);
         serviceErr.statusCode = 503;
@@ -386,8 +474,18 @@ export async function clearSessionHistory(sessionTarget, client = getRedisClient
     serviceErr.statusCode = 503;
     throw serviceErr;
   }
-  if (key) inMemorySessionStore.delete(key);
-  if (sessionId) inMemorySessionOwners.delete(String(sessionId).trim());
+
+  // 2. In-memory cleanup with verified ownership (dev/test environments)
+  const memOwner = inMemorySessionOwners.get(cleanSessionId);
+  if (memOwner) {
+    if (memOwner.orgId !== cleanOrgId || memOwner.userId !== cleanUserId) {
+      throw new SessionOwnershipError(
+        `Forbidden: Session '${cleanSessionId}' does not belong to the authenticated user.`
+      );
+    }
+    inMemorySessionOwners.delete(cleanSessionId);
+  }
+  if (historyKey) inMemorySessionStore.delete(historyKey);
 }
 
 /**

@@ -23,6 +23,18 @@ else
 end
 `;
 
+/**
+ * Atomic Redis Lua script to extend / renew lock TTL only if the token matches.
+ * Returns 1 if extended, 0 if lock expired or token mismatch.
+ */
+const EXTEND_LOCK_LUA = `
+if redis.call("get", KEYS[1]) == ARGV[1] then
+  return redis.call("expire", KEYS[1], tonumber(ARGV[2]))
+else
+  return 0
+end
+`;
+
 export const ACTION_TYPES = {
   APPLY_LEAVE: 'APPLY_LEAVE',
   REQUEST_HARDWARE_UPGRADE: 'REQUEST_HARDWARE_UPGRADE',
@@ -233,22 +245,21 @@ export async function acquireActionLock(actionId, userId, client = getRedisClien
  * an expired lock does not accidentally delete a newer lock acquired by another request.
  *
  * @param {string} actionId Staged action ID
- * @param {string} [lockToken] Unique lock token generated at acquisition
+ * @param {string} lockToken Unique lock token generated at acquisition (mandatory)
  * @param {Object} [client] Redis client instance
  */
-export async function releaseActionLock(actionId, lockToken = null, client = getRedisClient()) {
+export async function releaseActionLock(actionId, lockToken, client = getRedisClient()) {
+  if (!actionId || !lockToken) {
+    throw new HITLError('actionId and lockToken are strictly required to release action lock.', 400);
+  }
   const lockKey = `${ACTION_LOCK_PREFIX}${actionId}`;
 
   if (client && (client.isReady || client.isOpen)) {
     try {
-      if (lockToken) {
-        await client.eval(RELEASE_LOCK_LUA, {
-          keys: [lockKey],
-          arguments: [String(lockToken)],
-        });
-      } else {
-        await client.del(lockKey);
-      }
+      await client.eval(RELEASE_LOCK_LUA, {
+        keys: [lockKey],
+        arguments: [String(lockToken)],
+      });
     } catch (err) {
       if (config.nodeEnv === 'production') {
         console.error(`🚨 [HITL Gatekeeper] Redis lock release failed in production (${lockKey}): ${err.message}`);
@@ -260,10 +271,48 @@ export async function releaseActionLock(actionId, lockToken = null, client = get
   if (inMem) {
     const memToken = typeof inMem === 'object' && inMem !== null ? inMem.lockToken : null;
     const memExpiresAt = typeof inMem === 'object' && inMem !== null ? inMem.expiresAt : inMem;
-    if (!lockToken || memToken === lockToken || memExpiresAt <= Date.now()) {
+    if (memToken === lockToken || memExpiresAt <= Date.now()) {
       hitlLockStore.delete(lockKey);
     }
   }
+}
+
+/**
+ * Extend / renew an active execution lock atomically using Redis Lua script.
+ * Verifies that the current lock value matches the unique lockToken before extending TTL.
+ *
+ * @param {string} actionId Staged action ID
+ * @param {string} lockToken Unique lock token generated at acquisition
+ * @param {Object} [client] Redis client instance
+ * @param {number} [lockTtlSeconds=30] Lock TTL in seconds
+ * @returns {Promise<boolean>} True if renewed, false if lock was lost / mismatch
+ */
+export async function extendActionLock(actionId, lockToken, client = getRedisClient(), lockTtlSeconds = 30) {
+  if (!actionId || !lockToken) return false;
+  const lockKey = `${ACTION_LOCK_PREFIX}${actionId}`;
+
+  if (client && (client.isReady || client.isOpen)) {
+    try {
+      const res = await client.eval(EXTEND_LOCK_LUA, {
+        keys: [lockKey],
+        arguments: [String(lockToken), String(lockTtlSeconds)],
+      });
+      return res === 1;
+    } catch (err) {
+      if (config.nodeEnv === 'production') {
+        console.error(`🚨 [HITL Gatekeeper] Lock renewal failed in production (${lockKey}): ${err.message}`);
+      }
+      return false;
+    }
+  }
+
+  // Non-production in-memory lock store renewal
+  const inMem = hitlLockStore.get(lockKey);
+  if (inMem && typeof inMem === 'object' && inMem.lockToken === lockToken && inMem.expiresAt > Date.now()) {
+    inMem.expiresAt = Date.now() + lockTtlSeconds * 1000;
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -744,6 +793,39 @@ export async function consumeActionToken({
     throw new HITLError('Action approval is currently being processed concurrently.', 409);
   }
 
+  // Active lock renewal heartbeat to prevent expiration during long executions
+  let renewalTimer = null;
+  let lockLost = false;
+
+  const startHeartbeat = () => {
+    renewalTimer = setInterval(async () => {
+      try {
+        const renewed = await extendActionLock(cleanActionId, lockToken, client, 30);
+        if (!renewed) {
+          lockLost = true;
+          clearInterval(renewalTimer);
+          renewalTimer = null;
+          console.warn(`⚠️ [HITL Gatekeeper] Lock renewal failed for '${cleanActionId}'. Lock ownership lost.`);
+        }
+      } catch (err) {
+        lockLost = true;
+        clearInterval(renewalTimer);
+        renewalTimer = null;
+        console.error(`🚨 [HITL Gatekeeper] Error in lock renewal heartbeat (${cleanActionId}): ${err.message}`);
+      }
+    }, 10000); // Heartbeat runs every 10 seconds for 30s TTL
+    if (renewalTimer.unref) renewalTimer.unref();
+  };
+
+  const stopHeartbeat = () => {
+    if (renewalTimer) {
+      clearInterval(renewalTimer);
+      renewalTimer = null;
+    }
+  };
+
+  startHeartbeat();
+
   try {
     // 2. Fetch staged action from Redis (or memory fallback in non-production)
     const staged = await getStagedAction(cleanActionId, client);
@@ -771,6 +853,11 @@ export async function consumeActionToken({
       );
     }
 
+    // Verify lock integrity before proceeding with state-dependent operations
+    if (lockLost) {
+      throw new HITLError('Action lock renewal failed: Lock ownership lost during execution.', 409);
+    }
+
     // 6. Idempotency Check: Verify database has not already processed this token
     if (Ticket.db?.readyState === 1 || typeof Ticket.findOne === 'function') {
       const existingTicket = await Ticket.findOne({
@@ -786,6 +873,10 @@ export async function consumeActionToken({
 
     // 7. Handle REJECTION: Clean up token and return status
     if (normalizedDecision === 'REJECT') {
+      if (lockLost) {
+        throw new HITLError('Action lock lost during execution: Rejection aborted.', 409);
+      }
+
       await deleteStagedAction(cleanActionId, client);
 
       recordAuditLog({
@@ -814,6 +905,11 @@ export async function consumeActionToken({
         type: staged.type,
         message: `Action '${staged.type}' was rejected by user. No database changes were applied.`,
       };
+    }
+
+    // Check lock ownership immediately prior to executing database mutations
+    if (lockLost) {
+      throw new HITLError('Action lock renewal failed: Lock ownership lost prior to mutation execution.', 409);
     }
 
     // 8. Handle APPROVAL: Execute database mutations
@@ -851,6 +947,7 @@ export async function consumeActionToken({
       message: `Action '${staged.type}' confirmed and executed successfully.`,
     };
   } finally {
+    stopHeartbeat();
     // Release execution lock safely using atomic compare-and-delete
     await releaseActionLock(cleanActionId, lockToken, client);
   }
