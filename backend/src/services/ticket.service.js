@@ -197,7 +197,9 @@ export async function createTicketService({ user, ticketData }) {
         priority: normalizedPriority,
       },
     },
-  }).catch(() => {});
+  }).catch((err) => {
+    console.error(`🚨 [AuditLog] Failed to record audit log for ticket creation (${ticketId}): ${err.message}`);
+  });
 
   return newTicket;
 }
@@ -214,7 +216,7 @@ export async function updateTicketService({ user, ticketId, updateData }) {
     throw new TicketServiceError('Parameter ticketId is required.', 400);
   }
 
-  const { status, priority, assignedTo, resolutionNotes } = updateData || {};
+  const { status, priority, assignedTo, resolutionNotes, title, description } = updateData || {};
 
   let ticket = null;
   if (typeof Ticket.findOne === 'function') {
@@ -233,31 +235,98 @@ export async function updateTicketService({ user, ticketId, updateData }) {
   const isOwner = ticket.userId === user.userId;
   const isManager = user.role === 'manager';
 
-  if (!isAdmin && !isOwner && !isManager) {
+  // Check if ticket owner is an authorized direct report of the manager
+  let isDirectReport = false;
+  if (isManager && !isOwner) {
+    if (User.db?.readyState === 1 || typeof User.findOne === 'function') {
+      const report = await User.findOne({
+        orgId: user.orgId,
+        userId: ticket.userId,
+        managerId: user.userId,
+      }).select('userId').lean();
+      isDirectReport = Boolean(report);
+    }
+  }
+
+  if (!isAdmin && !isOwner && !isDirectReport) {
+    if (isManager) {
+      throw new TicketServiceError(
+        'Access Denied: Managers can only update tickets belonging to their authorized direct reports.',
+        403
+      );
+    }
     throw new TicketServiceError(
       'Access Denied: You do not have permission to modify this ticket.',
       403
     );
   }
 
+  // Role-based restrictions on fields:
+  // Managers (for direct reports) and Admins can update status, priority, assignment, and resolution notes.
+  const canManageTicket = isAdmin || isDirectReport;
   const updates = {};
-  if (status && TICKET_STATUSES.includes(status.toUpperCase())) {
-    updates.status = status.toUpperCase();
+
+  if (status) {
+    const normalizedStatus = status.toUpperCase();
+    if (!TICKET_STATUSES.includes(normalizedStatus)) {
+      throw new TicketServiceError(
+        `Invalid status '${status}'. Allowed: ${TICKET_STATUSES.join(', ')}`,
+        400
+      );
+    }
+    if (!canManageTicket) {
+      throw new TicketServiceError(
+        'Access Denied: Only administrators and designated managers can update ticket status.',
+        403
+      );
+    }
+    updates.status = normalizedStatus;
   }
-  if (
-    priority &&
-    TICKET_PRIORITIES.includes(priority.toUpperCase()) &&
-    (isAdmin || isManager)
-  ) {
-    updates.priority = priority.toUpperCase();
+
+  if (priority) {
+    const normalizedPriority = priority.toUpperCase();
+    if (!TICKET_PRIORITIES.includes(normalizedPriority)) {
+      throw new TicketServiceError(
+        `Invalid priority '${priority}'. Allowed: ${TICKET_PRIORITIES.join(', ')}`,
+        400
+      );
+    }
+    if (!canManageTicket) {
+      throw new TicketServiceError(
+        'Access Denied: Only administrators and designated managers can modify ticket priority.',
+        403
+      );
+    }
+    updates.priority = normalizedPriority;
   }
-  if (assignedTo !== undefined && (isAdmin || isManager)) {
+
+  if (assignedTo !== undefined) {
+    if (!canManageTicket) {
+      throw new TicketServiceError(
+        'Access Denied: Only administrators and designated managers can assign tickets.',
+        403
+      );
+    }
     updates.assignedTo = assignedTo ? assignedTo.trim() : null;
   }
+
   if (resolutionNotes) {
+    if (!canManageTicket) {
+      throw new TicketServiceError(
+        'Access Denied: Only administrators and designated managers can provide resolution notes.',
+        403
+      );
+    }
     updates['metadata.resolutionNotes'] = resolutionNotes.trim();
     updates['metadata.resolvedAt'] = new Date().toISOString();
     updates['metadata.resolvedBy'] = user.userId;
+  }
+
+  if (title && (isOwner || canManageTicket)) {
+    updates.title = title.trim();
+  }
+  if (description !== undefined && (isOwner || canManageTicket)) {
+    updates.description = description.trim();
   }
 
   let updatedTicket = null;
@@ -288,7 +357,9 @@ export async function updateTicketService({ user, ticketId, updateData }) {
       before: { status: ticket.status },
       after: updates,
     },
-  }).catch(() => {});
+  }).catch((err) => {
+    console.error(`🚨 [AuditLog] Failed to record audit log for ticket update (${ticketId.trim()}): ${err.message}`);
+  });
 
   return updatedTicket || { ...ticket, ...updates };
 }

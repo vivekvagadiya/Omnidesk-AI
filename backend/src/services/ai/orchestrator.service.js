@@ -170,7 +170,7 @@ export async function validateSessionOwnership({ sessionId, user, client = getRe
   const ownerKey = `session:owner:${cleanSessionId}`;
 
   // 1. Check Redis if available
-  if (client && client.isOpen) {
+  if (client && (client.isReady || client.isOpen)) {
     try {
       const rawOwner = await client.get(ownerKey);
       if (rawOwner) {
@@ -217,8 +217,15 @@ export async function validateSessionOwnership({ sessionId, user, client = getRe
       if (err instanceof SessionOwnershipError) throw err;
       if (config.nodeEnv === 'production') {
         console.error(`🚨 [Orchestrator] Redis session ownership error (${cleanSessionId}): ${err.message}`);
+        const serviceErr = new Error(`Service Unavailable: Redis session ownership error - ${err.message}`);
+        serviceErr.statusCode = 503;
+        throw serviceErr;
       }
     }
+  } else if (config.nodeEnv === 'production') {
+    const serviceErr = new Error('Service Unavailable: Redis is unavailable.');
+    serviceErr.statusCode = 503;
+    throw serviceErr;
   }
 
   // 2. Non-production / offline in-memory fallback
@@ -266,12 +273,18 @@ export async function getSessionHistory(sessionTarget, client = getRedisClient()
     } catch (err) {
       if (config.nodeEnv === 'production') {
         console.error(`🚨 [Orchestrator] Redis session read failed in production (${key}): ${err.message}`);
+        const serviceErr = new Error(`Service Unavailable: Redis session read error - ${err.message}`);
+        serviceErr.statusCode = 503;
+        throw serviceErr;
       } else {
         console.warn(`⚠️ [Orchestrator] Redis session read error: ${err.message}. Using memory store.`);
       }
     }
   } else if (config.nodeEnv === 'production') {
     console.error(`🚨 [Orchestrator] Redis unavailable in production for session read (${key}).`);
+    const serviceErr = new Error('Service Unavailable: Redis session store is unavailable.');
+    serviceErr.statusCode = 503;
+    throw serviceErr;
   }
 
   // Non-production fallback (offline sandbox / unit tests)
@@ -310,12 +323,18 @@ export async function appendSessionMessage(sessionTarget, message, client = getR
     } catch (err) {
       if (config.nodeEnv === 'production') {
         console.error(`🚨 [Orchestrator] Redis session write failed in production (${key}): ${err.message}`);
+        const serviceErr = new Error(`Service Unavailable: Redis session write error - ${err.message}`);
+        serviceErr.statusCode = 503;
+        throw serviceErr;
       } else {
         console.warn(`⚠️ [Orchestrator] Redis session write error: ${err.message}. Saving to memory store.`);
       }
     }
   } else if (config.nodeEnv === 'production') {
     console.error(`🚨 [Orchestrator] Redis unavailable in production for session write (${key}).`);
+    const serviceErr = new Error('Service Unavailable: Redis session store is unavailable.');
+    serviceErr.statusCode = 503;
+    throw serviceErr;
   }
 
   // Non-production fallback
@@ -355,8 +374,17 @@ export async function clearSessionHistory(sessionTarget, client = getRedisClient
       if (key) await client.del(key);
       if (ownerKey) await client.del(ownerKey);
     } catch (err) {
+      if (config.nodeEnv === 'production') {
+        const serviceErr = new Error(`Service Unavailable: Redis session delete error - ${err.message}`);
+        serviceErr.statusCode = 503;
+        throw serviceErr;
+      }
       console.warn(`⚠️ [Orchestrator] Redis session delete error: ${err.message}`);
     }
+  } else if (config.nodeEnv === 'production') {
+    const serviceErr = new Error('Service Unavailable: Redis session store is unavailable.');
+    serviceErr.statusCode = 503;
+    throw serviceErr;
   }
   if (key) inMemorySessionStore.delete(key);
   if (sessionId) inMemorySessionOwners.delete(String(sessionId).trim());
@@ -782,7 +810,9 @@ async function finalizeTurn({
           hasActionRequired: Boolean(stagedAction),
         },
       },
-    }).catch(() => {});
+    }).catch((err) => {
+      console.error(`🚨 [AuditLog] Failed to record audit log for copilot turn (session: ${sessionId}): ${err.message}`);
+    });
   }
 
   return {

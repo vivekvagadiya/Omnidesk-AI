@@ -193,7 +193,9 @@ export async function updateAssetService({ user, assetTag, updateData }) {
     changes: {
       after: updateFields,
     },
-  }).catch(() => {});
+  }).catch((err) => {
+    console.error(`🚨 [AuditLog] Failed to record audit log for asset update (${assetTag.trim()}): ${err.message}`);
+  });
 
   return updated;
 }

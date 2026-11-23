@@ -610,7 +610,9 @@ export async function executeTool(toolName, args = {}, context = {}) {
     changes: {
       after: { args },
     },
-  }).catch(() => {});
+  }).catch((err) => {
+    console.error(`🚨 [AuditLog] Failed to record audit log for tool execution (${toolName}): ${err.message}`);
+  });
 
   return result;
 }

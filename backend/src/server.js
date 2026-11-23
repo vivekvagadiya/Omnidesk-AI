@@ -2,7 +2,6 @@ import app from "./app.js";
 import { config } from "./config/environment.js";
 import { connectDB, disconnectDB } from "./config/db.js";
 import { connectRedis, disconnectRedis } from "./config/redis.js";
-import { seedBaselineAuditLogs } from "./services/audit/audit.service.js";
 
 let server;
 
@@ -18,9 +17,6 @@ async function bootstrap() {
   // Initialize Database Connections
   await connectDB();
   await connectRedis();
-
-  // Seed initial cryptographic audit baseline
-  // await seedBaselineAuditLogs('org_abc');
 
   server = app.listen(config.port, () => {
     console.log(`\n🌐 HTTP Server running on: http://localhost:${config.port}`);

@@ -45,6 +45,10 @@ export const config = {
     url: process.env.QDRANT_URL,
   },
 
+  auth: {
+    allowOfflineFallback: !isProduction && (process.env.ALLOW_OFFLINE_AUTH === 'true' || nodeEnv === 'test'),
+  },
+
   jwt: {
     secret: process.env.JWT_SECRET || 'dev_secret_key_omnidesk_2026',
     refreshSecret: process.env.JWT_REFRESH_SECRET || 'dev_refresh_secret_key_omnidesk_2026',

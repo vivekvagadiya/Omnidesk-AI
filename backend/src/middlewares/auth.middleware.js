@@ -45,15 +45,14 @@ export async function authenticateJwt(req, res, next) {
           req.user = typeof user.toSafeObject === 'function' ? user.toSafeObject() : user;
           req.userDoc = user;
           return next();
-        } else if (config.nodeEnv === 'production' || User.db?.readyState === 1) {
-          // When DB is active or in production, non-existent user must be rejected
+        } else {
           return errorResponse(res, {
             statusCode: 401,
             message: 'User account not found or has been deactivated.',
           });
         }
       } catch (dbErr) {
-        if (config.nodeEnv === 'production' || User.db?.readyState === 1) {
+        if (!config.auth?.allowOfflineFallback) {
           return errorResponse(res, {
             statusCode: 503,
             message: 'Authentication service unavailable: Database connection required.',
@@ -61,15 +60,15 @@ export async function authenticateJwt(req, res, next) {
           });
         }
       }
-    } else if (config.nodeEnv === 'production') {
-      // In production, database connection is strictly required for authentication
+    } else if (!config.auth?.allowOfflineFallback) {
+      // In production or when offline fallback is not explicitly configured, DB is strictly required
       return errorResponse(res, {
         statusCode: 503,
         message: 'Authentication service unavailable: Database connection required.',
       });
     }
 
-    // Fast-path / fallback strictly when running offline unit tests without live DB
+    // Fast-path / fallback strictly when offline auth is explicitly configured in dev/test
     req.user = decoded;
     next();
   } catch (err) {

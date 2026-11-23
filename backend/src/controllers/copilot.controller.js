@@ -7,6 +7,7 @@ import {
 import {
   consumeActionToken,
   getStagedAction,
+  isUserAuthorizedToDecide,
   HITLError,
   ActionNotFoundError,
   ActionExpiredError,
@@ -58,8 +59,9 @@ export async function streamChat(req, res, next) {
         message: err.message || 'Forbidden: Session does not belong to the authenticated user.',
       });
     }
+    const statusCode = err.statusCode || 500;
     return errorResponse(res, {
-      statusCode: 500,
+      statusCode,
       message: err.message || 'Failed to validate session ownership.',
     });
   }
@@ -241,13 +243,23 @@ export async function getActionDetails(req, res) {
       });
     }
 
+    // Permit access only to the original requester or an explicitly authorized approver
+    const isAuthorized = await isUserAuthorizedToDecide({ stagedAction: staged, user });
+    if (!isAuthorized) {
+      return errorResponse(res, {
+        statusCode: 403,
+        message: 'Access denied: You are not authorized to view details of this staged action.',
+      });
+    }
+
     return successResponse(res, {
       statusCode: 200,
       data: staged,
     });
   } catch (err) {
+    const statusCode = err.statusCode || 500;
     return errorResponse(res, {
-      statusCode: 500,
+      statusCode,
       message: err.message || 'Failed to retrieve staged action.',
     });
   }
@@ -328,7 +340,9 @@ export async function uploadDocument(req, res) {
         ipAddress: req.ip || req.headers?.['x-forwarded-for'] || null,
         userAgent: req.headers?.['user-agent'] || null,
       },
-    }).catch(() => {});
+    }).catch((err) => {
+      console.error(`🚨 [AuditLog] Failed to record audit log for document upload (${result?.docId || req.file.originalname}): ${err.message}`);
+    });
 
     return successResponse(res, {
       statusCode: 201,

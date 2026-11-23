@@ -11,6 +11,18 @@ export const ACTION_TOKEN_TTL_SECONDS = 900; // 15 minutes TTL
 export const ACTION_PREFIX = 'action:';
 export const ACTION_LOCK_PREFIX = 'action:lock:';
 
+/**
+ * Atomic Redis Lua script to release an acquired lock only if the token matches.
+ * Prevents race conditions where an expired lock could delete a newer lock.
+ */
+const RELEASE_LOCK_LUA = `
+if redis.call("get", KEYS[1]) == ARGV[1] then
+  return redis.call("del", KEYS[1])
+else
+  return 0
+end
+`;
+
 export const ACTION_TYPES = {
   APPLY_LEAVE: 'APPLY_LEAVE',
   REQUEST_HARDWARE_UPGRADE: 'REQUEST_HARDWARE_UPGRADE',
@@ -28,7 +40,8 @@ const hitlCleanupTimer = setInterval(() => {
       hitlMemoryStore.delete(key);
     }
   }
-  for (const [key, expiresAt] of hitlLockStore.entries()) {
+  for (const [key, record] of hitlLockStore.entries()) {
+    const expiresAt = typeof record === 'object' && record !== null ? record?.expiresAt : record;
     if (expiresAt <= now) {
       hitlLockStore.delete(key);
     }
@@ -178,21 +191,23 @@ export function buildApprovalCardMetadata(stagedAction) {
 }
 
 /**
- * Acquire a single-use execution lock for an action token to prevent concurrent double-approvals
+ * Acquire a single-use execution lock for an action token to prevent concurrent double-approvals.
+ * Generates a unique lock token stored alongside the lock key with TTL.
  *
  * @param {string} actionId Staged action ID
- * @param {string} userId Requesting or approving user ID
+ * @param {string} [userId] Requesting or approving user ID
  * @param {Object} [client] Redis client instance
  * @param {number} [lockTtlSeconds=30] Lock TTL in seconds
- * @returns {Promise<boolean>} True if lock acquired, false if already locked
+ * @returns {Promise<string|null>} Unique lock token if acquired, null if already locked
  */
 export async function acquireActionLock(actionId, userId, client = getRedisClient(), lockTtlSeconds = 30) {
   const lockKey = `${ACTION_LOCK_PREFIX}${actionId}`;
+  const lockToken = `lck_${crypto.randomUUID()}`;
 
   if (client && (client.isReady || client.isOpen)) {
     try {
-      const res = await client.set(lockKey, userId || 'locked', { NX: true, EX: lockTtlSeconds });
-      return res === 'OK';
+      const res = await client.set(lockKey, lockToken, { NX: true, EX: lockTtlSeconds });
+      return res === 'OK' ? lockToken : null;
     } catch (err) {
       if (config.nodeEnv === 'production') {
         throw new HITLError(`Unable to acquire action lock: State Redis error - ${err.message}`, 503);
@@ -205,29 +220,50 @@ export async function acquireActionLock(actionId, userId, client = getRedisClien
   // Non-production in-memory lock
   const now = Date.now();
   const existingLock = hitlLockStore.get(lockKey);
-  if (existingLock && existingLock > now) {
-    return false;
+  const existingExpiresAt = typeof existingLock === 'object' && existingLock !== null ? existingLock?.expiresAt : existingLock;
+  if (existingExpiresAt && existingExpiresAt > now) {
+    return null;
   }
-  hitlLockStore.set(lockKey, now + lockTtlSeconds * 1000);
-  return true;
+  hitlLockStore.set(lockKey, { lockToken, expiresAt: now + lockTtlSeconds * 1000 });
+  return lockToken;
 }
 
 /**
- * Release an execution lock
+ * Release an execution lock using an atomic compare-and-delete Lua script to ensure
+ * an expired lock does not accidentally delete a newer lock acquired by another request.
  *
  * @param {string} actionId Staged action ID
+ * @param {string} [lockToken] Unique lock token generated at acquisition
  * @param {Object} [client] Redis client instance
  */
-export async function releaseActionLock(actionId, client = getRedisClient()) {
+export async function releaseActionLock(actionId, lockToken = null, client = getRedisClient()) {
   const lockKey = `${ACTION_LOCK_PREFIX}${actionId}`;
-  if (client && client.isOpen) {
+
+  if (client && (client.isReady || client.isOpen)) {
     try {
-      await client.del(lockKey);
-    } catch {
-      // Non-fatal
+      if (lockToken) {
+        await client.eval(RELEASE_LOCK_LUA, {
+          keys: [lockKey],
+          arguments: [String(lockToken)],
+        });
+      } else {
+        await client.del(lockKey);
+      }
+    } catch (err) {
+      if (config.nodeEnv === 'production') {
+        console.error(`🚨 [HITL Gatekeeper] Redis lock release failed in production (${lockKey}): ${err.message}`);
+      }
     }
   }
-  hitlLockStore.delete(lockKey);
+
+  const inMem = hitlLockStore.get(lockKey);
+  if (inMem) {
+    const memToken = typeof inMem === 'object' && inMem !== null ? inMem.lockToken : null;
+    const memExpiresAt = typeof inMem === 'object' && inMem !== null ? inMem.expiresAt : inMem;
+    if (!lockToken || memToken === lockToken || memExpiresAt <= Date.now()) {
+      hitlLockStore.delete(lockKey);
+    }
+  }
 }
 
 /**
@@ -332,7 +368,9 @@ export async function stageActionToken({
     changes: {
       after: payload,
     },
-  }).catch(() => {});
+  }).catch((err) => {
+    console.error(`🚨 [AuditLog] Failed to record audit log for staged action (${actionId}): ${err.message}`);
+  });
 
   return {
     actionId,
@@ -701,8 +739,8 @@ export async function consumeActionToken({
   }
 
   // 1. Acquire single-use execution lock to prevent concurrent double-approvals
-  const lockAcquired = await acquireActionLock(cleanActionId, user.userId, client);
-  if (!lockAcquired) {
+  const lockToken = await acquireActionLock(cleanActionId, user.userId, client);
+  if (!lockToken) {
     throw new HITLError('Action approval is currently being processed concurrently.', 409);
   }
 
@@ -765,7 +803,9 @@ export async function consumeActionToken({
         changes: {
           before: staged.payload,
         },
-      }).catch(() => {});
+      }).catch((err) => {
+        console.error(`🚨 [AuditLog] Failed to record audit log for action rejection (${cleanActionId}): ${err.message}`);
+      });
 
       return {
         success: true,
@@ -798,7 +838,9 @@ export async function consumeActionToken({
         before: staged.payload,
         after: { ...staged.payload, result: executionResult },
       },
-    }).catch(() => {});
+    }).catch((err) => {
+      console.error(`🚨 [AuditLog] Failed to record audit log for action approval (${cleanActionId}): ${err.message}`);
+    });
 
     return {
       success: true,
@@ -809,7 +851,7 @@ export async function consumeActionToken({
       message: `Action '${staged.type}' confirmed and executed successfully.`,
     };
   } finally {
-    // Release execution lock
-    await releaseActionLock(cleanActionId, client);
+    // Release execution lock safely using atomic compare-and-delete
+    await releaseActionLock(cleanActionId, lockToken, client);
   }
 }

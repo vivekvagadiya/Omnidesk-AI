@@ -8,8 +8,6 @@
  * to avoid duplicate notification processing paths.
  */
 
-export const NOTIFICATION_QUEUE_KEY = 'queue:notifications';
-
 /**
  * @deprecated Use `notify()` from `notification.service.js` instead.
  */
@@ -42,8 +40,4 @@ export async function startNotificationWorker() {
  */
 export async function stopNotificationWorker() {
   // No-op
-}
-
-export function getInMemoryQueue() {
-  return [];
 }
