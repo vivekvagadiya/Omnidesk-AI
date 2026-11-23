@@ -49,17 +49,215 @@ if (sessionCleanupTimer.unref) {
   sessionCleanupTimer.unref();
 }
 
+// In-memory session ownership registry for offline/non-production environments: sessionId -> { orgId, userId, expiresAt }
+const inMemorySessionOwners = new Map();
+
+// Periodic cleanup of in-memory session owners
+const sessionOwnerCleanupTimer = setInterval(() => {
+  const now = Date.now();
+  for (const [key, owner] of inMemorySessionOwners.entries()) {
+    if (owner.expiresAt <= now) {
+      inMemorySessionOwners.delete(key);
+    }
+  }
+}, 10 * 60 * 1000);
+
+if (sessionOwnerCleanupTimer.unref) {
+  sessionOwnerCleanupTimer.unref();
+}
+
+/**
+ * Custom Error for Session Ownership Violations
+ */
+export class SessionOwnershipError extends Error {
+  constructor(message = 'Session ownership validation failed: Unauthorized session access.') {
+    super(message);
+    this.name = 'SessionOwnershipError';
+    this.statusCode = 403;
+  }
+}
+
+/**
+ * Build the canonical scoped Redis key for session message history
+ * Scoped by orgId + userId + sessionId:
+ * `session:${orgId}:${userId}:${sessionId}:messages`
+ *
+ * @param {Object} params
+ * @param {string} params.orgId
+ * @param {string} params.userId
+ * @param {string} params.sessionId
+ * @returns {string}
+ */
+export function buildSessionKey({ orgId, userId, sessionId }) {
+  if (!sessionId) return null;
+  const cleanSessionId = String(sessionId).trim();
+  if (orgId && userId) {
+    return `session:${String(orgId).trim()}:${String(userId).trim()}:${cleanSessionId}:messages`;
+  }
+  return `session:${cleanSessionId}:messages`;
+}
+
+/**
+ * Resolve the canonical scoped Redis key for a session target.
+ *
+ * @param {string|Object} target Session ID string or { sessionId, orgId, userId } object
+ * @param {Object} [user] User object { orgId, userId }
+ * @param {Object} [client] Redis client
+ * @returns {Promise<string>} Scoped key
+ */
+export async function resolveSessionKey(target, user = null, client = null) {
+  if (!target) return null;
+
+  if (typeof target === 'object' && target !== null) {
+    const sessionId = target.sessionId || target.id;
+    const orgId = target.orgId || target.user?.orgId || user?.orgId;
+    const userId = target.userId || target.user?.userId || user?.userId;
+    return buildSessionKey({ orgId, userId, sessionId });
+  }
+
+  const cleanSessionId = String(target).trim();
+  if (user?.orgId && user?.userId) {
+    return buildSessionKey({ orgId: user.orgId, userId: user.userId, sessionId: cleanSessionId });
+  }
+
+  // Check in-memory ownership registry
+  const memOwner = inMemorySessionOwners.get(cleanSessionId);
+  if (memOwner?.orgId && memOwner?.userId) {
+    return buildSessionKey({ orgId: memOwner.orgId, userId: memOwner.userId, sessionId: cleanSessionId });
+  }
+
+  // Check Redis ownership registry
+  if (client && client.isOpen) {
+    try {
+      const rawOwner = await client.get(`session:owner:${cleanSessionId}`);
+      if (rawOwner) {
+        const owner = JSON.parse(rawOwner);
+        if (owner.orgId && owner.userId) {
+          return buildSessionKey({ orgId: owner.orgId, userId: owner.userId, sessionId: cleanSessionId });
+        }
+      }
+    } catch {
+      // Fall through to legacy/unbound key
+    }
+  }
+
+  return `session:${cleanSessionId}:messages`;
+}
+
+/**
+ * Validate that a sessionId is owned by the authenticated user and organization.
+ *
+ * Scopes session ownership in Redis under `session:owner:${sessionId}`.
+ * - If session is already owned by another user or tenant, throws SessionOwnershipError (403).
+ * - If session is new, registers ownership to the authenticated user and tenant with SESSION_TTL_SECONDS.
+ * - If session is already owned by the authenticated user, refreshes the ownership TTL.
+ *
+ * @param {Object} params
+ * @param {string} params.sessionId Target session ID
+ * @param {Object} params.user Authenticated user object ({ orgId, userId })
+ * @param {Object} [params.client] Redis client instance
+ * @returns {Promise<boolean>} True if ownership is valid and active
+ */
+export async function validateSessionOwnership({ sessionId, user, client = getRedisClient() }) {
+  if (!sessionId || typeof sessionId !== 'string' || !sessionId.trim()) {
+    throw new SessionOwnershipError('sessionId is required for ownership validation.');
+  }
+  if (!user || !user.orgId || !user.userId) {
+    throw new SessionOwnershipError('Authenticated user with orgId and userId is required.');
+  }
+
+  const cleanSessionId = sessionId.trim();
+  const ownerKey = `session:owner:${cleanSessionId}`;
+
+  // 1. Check Redis if available
+  if (client && client.isOpen) {
+    try {
+      const rawOwner = await client.get(ownerKey);
+      if (rawOwner) {
+        const owner = JSON.parse(rawOwner);
+        if (owner.orgId !== user.orgId || owner.userId !== user.userId) {
+          console.warn(
+            `🚨 [Security] Session ownership breach: User '${user.userId}' (Org: '${user.orgId}') attempted to access session '${cleanSessionId}' owned by '${owner.userId}' (Org: '${owner.orgId}').`
+          );
+          throw new SessionOwnershipError(
+            `Forbidden: Session '${cleanSessionId}' does not belong to the authenticated user.`
+          );
+        }
+        // Refresh TTL on active access
+        await client.expire(ownerKey, SESSION_TTL_SECONDS);
+        return true;
+      }
+
+      // New session: bind ownership atomically with NX
+      const ownerPayload = JSON.stringify({
+        orgId: user.orgId,
+        userId: user.userId,
+        createdAt: new Date().toISOString(),
+      });
+
+      const setSuccess = await client.set(ownerKey, ownerPayload, {
+        NX: true,
+        EX: SESSION_TTL_SECONDS,
+      });
+
+      if (!setSuccess) {
+        // Handle concurrent registration
+        const currentRaw = await client.get(ownerKey);
+        if (currentRaw) {
+          const currentOwner = JSON.parse(currentRaw);
+          if (currentOwner.orgId !== user.orgId || currentOwner.userId !== user.userId) {
+            throw new SessionOwnershipError(
+              `Forbidden: Session '${cleanSessionId}' does not belong to the authenticated user.`
+            );
+          }
+        }
+      }
+      return true;
+    } catch (err) {
+      if (err instanceof SessionOwnershipError) throw err;
+      if (config.nodeEnv === 'production') {
+        console.error(`🚨 [Orchestrator] Redis session ownership error (${cleanSessionId}): ${err.message}`);
+      }
+    }
+  }
+
+  // 2. Non-production / offline in-memory fallback
+  const memOwner = inMemorySessionOwners.get(cleanSessionId);
+  if (memOwner && memOwner.expiresAt > Date.now()) {
+    if (memOwner.orgId !== user.orgId || memOwner.userId !== user.userId) {
+      console.warn(
+        `🚨 [Security] In-memory session ownership breach: User '${user.userId}' (Org: '${user.orgId}') attempted to access session '${cleanSessionId}' owned by '${memOwner.userId}' (Org: '${memOwner.orgId}').`
+      );
+      throw new SessionOwnershipError(
+        `Forbidden: Session '${cleanSessionId}' does not belong to the authenticated user.`
+      );
+    }
+    memOwner.expiresAt = Date.now() + SESSION_TTL_SECONDS * 1000;
+    return true;
+  }
+
+  inMemorySessionOwners.set(cleanSessionId, {
+    orgId: user.orgId,
+    userId: user.userId,
+    expiresAt: Date.now() + SESSION_TTL_SECONDS * 1000,
+  });
+
+  return true;
+}
+
 /**
  * Retrieve sliding-window conversation turns from Redis (or in-memory non-prod fallback)
  *
- * @param {string} sessionId
+ * @param {string|Object} sessionTarget Session ID or { sessionId, orgId, userId }
  * @param {Object} [client]
+ * @param {Object} [user]
  * @returns {Promise<Array<{ role: string, text: string, timestamp: string }>>}
  */
-export async function getSessionHistory(sessionId, client = getRedisClient()) {
-  if (!sessionId) return [];
+export async function getSessionHistory(sessionTarget, client = getRedisClient(), user = null) {
+  if (!sessionTarget) return [];
 
-  const key = `session:${sessionId}:messages`;
+  const key = await resolveSessionKey(sessionTarget, user, client);
+  if (!key) return [];
 
   if (client && client.isOpen) {
     try {
@@ -67,13 +265,13 @@ export async function getSessionHistory(sessionId, client = getRedisClient()) {
       return rawTurns.map((turnStr) => JSON.parse(turnStr));
     } catch (err) {
       if (config.nodeEnv === 'production') {
-        console.error(`🚨 [Orchestrator] Redis session read failed in production (${sessionId}): ${err.message}`);
+        console.error(`🚨 [Orchestrator] Redis session read failed in production (${key}): ${err.message}`);
       } else {
         console.warn(`⚠️ [Orchestrator] Redis session read error: ${err.message}. Using memory store.`);
       }
     }
   } else if (config.nodeEnv === 'production') {
-    console.error(`🚨 [Orchestrator] Redis unavailable in production for session read (${sessionId}).`);
+    console.error(`🚨 [Orchestrator] Redis unavailable in production for session read (${key}).`);
   }
 
   // Non-production fallback (offline sandbox / unit tests)
@@ -87,14 +285,17 @@ export async function getSessionHistory(sessionId, client = getRedisClient()) {
 /**
  * Append a conversation turn to the Redis session sliding window
  *
- * @param {string} sessionId
+ * @param {string|Object} sessionTarget
  * @param {Object} message { role: 'user'|'model', text: string }
  * @param {Object} [client]
+ * @param {Object} [user]
  */
-export async function appendSessionMessage(sessionId, message, client = getRedisClient()) {
-  if (!sessionId || !message) return;
+export async function appendSessionMessage(sessionTarget, message, client = getRedisClient(), user = null) {
+  if (!sessionTarget || !message) return;
 
-  const key = `session:${sessionId}:messages`;
+  const key = await resolveSessionKey(sessionTarget, user, client);
+  if (!key) return;
+
   const enrichedMessage = {
     ...message,
     timestamp: message.timestamp || new Date().toISOString(),
@@ -108,13 +309,13 @@ export async function appendSessionMessage(sessionId, message, client = getRedis
       return;
     } catch (err) {
       if (config.nodeEnv === 'production') {
-        console.error(`🚨 [Orchestrator] Redis session write failed in production (${sessionId}): ${err.message}`);
+        console.error(`🚨 [Orchestrator] Redis session write failed in production (${key}): ${err.message}`);
       } else {
         console.warn(`⚠️ [Orchestrator] Redis session write error: ${err.message}. Saving to memory store.`);
       }
     }
   } else if (config.nodeEnv === 'production') {
-    console.error(`🚨 [Orchestrator] Redis unavailable in production for session write (${sessionId}).`);
+    console.error(`🚨 [Orchestrator] Redis unavailable in production for session write (${key}).`);
   }
 
   // Non-production fallback
@@ -136,21 +337,29 @@ export async function appendSessionMessage(sessionId, message, client = getRedis
 /**
  * Clear conversation history for a session
  *
- * @param {string} sessionId
+ * @param {string|Object} sessionTarget
  * @param {Object} [client]
+ * @param {Object} [user]
  */
-export async function clearSessionHistory(sessionId, client = getRedisClient()) {
-  if (!sessionId) return;
-  const key = `session:${sessionId}:messages`;
+export async function clearSessionHistory(sessionTarget, client = getRedisClient(), user = null) {
+  if (!sessionTarget) return;
+
+  const key = await resolveSessionKey(sessionTarget, user, client);
+  const sessionId = typeof sessionTarget === 'object' && sessionTarget !== null
+    ? (sessionTarget.sessionId || sessionTarget.id)
+    : sessionTarget;
+  const ownerKey = sessionId ? `session:owner:${String(sessionId).trim()}` : null;
 
   if (client && client.isOpen) {
     try {
-      await client.del(key);
+      if (key) await client.del(key);
+      if (ownerKey) await client.del(ownerKey);
     } catch (err) {
       console.warn(`⚠️ [Orchestrator] Redis session delete error: ${err.message}`);
     }
   }
-  inMemorySessionStore.delete(key);
+  if (key) inMemorySessionStore.delete(key);
+  if (sessionId) inMemorySessionOwners.delete(String(sessionId).trim());
 }
 
 /**
@@ -544,9 +753,13 @@ async function finalizeTurn({
     query: rawMessage,
   });
 
-  // 3. Append Turns to Redis Session Memory
-  await appendSessionMessage(sessionId, { role: 'user', text: rawMessage }, redisClient);
-  await appendSessionMessage(sessionId, { role: 'model', text: unmaskedAnswer }, redisClient);
+  // 3. Append Turns to Redis Session Memory (scoped by orgId + userId + sessionId)
+  const sessionTarget = user?.orgId && user?.userId
+    ? { sessionId, orgId: user.orgId, userId: user.userId }
+    : sessionId;
+
+  await appendSessionMessage(sessionTarget, { role: 'user', text: rawMessage }, redisClient, user);
+  await appendSessionMessage(sessionTarget, { role: 'model', text: unmaskedAnswer }, redisClient, user);
 
   // 4. Record Audit Log
   if (user?.orgId) {
@@ -616,15 +829,19 @@ export async function runCopilotTurn({
   if (!message || typeof message !== 'string' || message.trim().length === 0) {
     throw new Error('User message is required.');
   }
-  if (!user || !user.orgId) {
-    throw new Error('Authenticated user context with orgId is required.');
+  if (!user || !user.orgId || !user.userId) {
+    throw new Error('Authenticated user context with orgId and userId is required.');
   }
 
-  // 1. Pre-LLM PII Masking
+  // 1. Validate Session Ownership & Isolation
+  await validateSessionOwnership({ sessionId, user, client: redisClient });
+
+  // 2. Pre-LLM PII Masking
   const { maskedText, tokenMap, hasPII } = maskPII(message);
 
-  // 2. Load Multi-Turn History
-  const historyTurns = await getSessionHistory(sessionId, redisClient);
+  // 3. Load Multi-Turn History (scoped by orgId + userId + sessionId)
+  const sessionTarget = { sessionId, orgId: user.orgId, userId: user.userId };
+  const historyTurns = await getSessionHistory(sessionTarget, redisClient, user);
 
   // 3. Tool Intent Evaluation
   const detectedTool = detectToolIntent(message);
@@ -750,18 +967,22 @@ export async function streamCopilotTurn({
   if (!message || typeof message !== 'string' || message.trim().length === 0) {
     throw new Error('User message is required.');
   }
-  if (!user || !user.orgId) {
-    throw new Error('Authenticated user context with orgId is required.');
+  if (!user || !user.orgId || !user.userId) {
+    throw new Error('Authenticated user context with orgId and userId is required.');
   }
   if (typeof onEvent !== 'function') {
     throw new Error('onEvent callback function is required for SSE streaming.');
   }
 
-  // 1. Pre-LLM PII Masking
+  // 1. Validate Session Ownership & Isolation
+  await validateSessionOwnership({ sessionId, user, client: redisClient });
+
+  // 2. Pre-LLM PII Masking
   const { maskedText, tokenMap, hasPII } = maskPII(message);
 
-  // 2. Load Multi-Turn History
-  const historyTurns = await getSessionHistory(sessionId, redisClient);
+  // 3. Load Multi-Turn History (scoped by orgId + userId + sessionId)
+  const sessionTarget = { sessionId, orgId: user.orgId, userId: user.userId };
+  const historyTurns = await getSessionHistory(sessionTarget, redisClient, user);
 
   let accumulatedText = '';
   let stagedActionPayload = null;

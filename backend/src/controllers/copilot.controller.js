@@ -1,5 +1,9 @@
 import { initSSE, sendSSE, closeSSE } from '../utils/sse.js';
-import { streamCopilotTurn } from '../services/ai/orchestrator.service.js';
+import {
+  streamCopilotTurn,
+  validateSessionOwnership,
+  SessionOwnershipError,
+} from '../services/ai/orchestrator.service.js';
 import {
   consumeActionToken,
   getStagedAction,
@@ -41,6 +45,25 @@ export async function streamChat(req, res, next) {
     ? sessionId.trim()
     : `sess_${user.userId}`;
 
+  // Validate session ownership before establishing SSE connection to fail fast with 403
+  try {
+    await validateSessionOwnership({
+      sessionId: activeSessionId,
+      user,
+    });
+  } catch (err) {
+    if (err instanceof SessionOwnershipError || err.statusCode === 403) {
+      return errorResponse(res, {
+        statusCode: 403,
+        message: err.message || 'Forbidden: Session does not belong to the authenticated user.',
+      });
+    }
+    return errorResponse(res, {
+      statusCode: 500,
+      message: err.message || 'Failed to validate session ownership.',
+    });
+  }
+
   console.log(`\n💬 [Copilot Chat] User: ${user.name || user.userId} (${user.role}) | Session: ${activeSessionId}`);
   console.log(`💬 [Copilot Chat] Prompt: "${message.trim()}"`);
 
@@ -73,8 +96,9 @@ export async function streamChat(req, res, next) {
   } catch (err) {
     console.error(`\n❌ [Copilot Chat] Error during stream:`, err.message);
     if (!res.headersSent) {
+      const statusCode = (err instanceof SessionOwnershipError || err.statusCode === 403) ? 403 : 500;
       return errorResponse(res, {
-        statusCode: 500,
+        statusCode,
         message: err.message || 'An error occurred during chat turn execution.',
       });
     }
