@@ -6,12 +6,15 @@ import App from './App.jsx';
 import './index.css';
 import { queryClient } from './lib/queryClient';
 import { AuthProvider } from './context/AuthContext.jsx';
+import { RouterProvider } from './context/RouterContext.jsx';
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
     <QueryClientProvider client={queryClient}>
       <AuthProvider>
-        <App />
+        <RouterProvider>
+          <App />
+        </RouterProvider>
       </AuthProvider>
       {/* Rendered in development only; compiled out of production builds */}
       <ReactQueryDevtools initialIsOpen={false} buttonPosition="bottom-left" />
