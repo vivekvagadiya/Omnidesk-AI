@@ -1,14 +1,16 @@
-import crypto from 'node:crypto';
 import { User } from '../../models/User.model.js';
-import { Ticket, TICKET_CATEGORIES, TICKET_PRIORITIES } from '../../models/Ticket.model.js';
 import { Asset, ASSET_TYPES } from '../../models/Asset.model.js';
+import { TICKET_PRIORITIES } from '../../models/Ticket.model.js';
 import { retrievePolicyContext } from '../rag/retrieval.service.js';
 import {
   stageActionToken,
   ACTION_TYPES,
 } from './hitlGatekeeper.service.js';
-import { invalidateTicketCaches } from '../cache/cache.service.js';
-import { notify } from '../notifications/notification.service.js';
+import {
+  createTicketService,
+  getTicketsService,
+  TicketServiceError,
+} from '../ticket.service.js';
 import { recordAuditLog } from '../audit/audit.service.js';
 
 export const SAFE_TOOLS = ['searchPolicies', 'getLeaveBalance', 'getMyTickets'];
@@ -32,7 +34,7 @@ export class InvalidToolError extends ToolExecutionError {
 
 /**
  * 1. searchPolicies (Safe Tool)
- * Queries Qdrant vector store with tenant and role isolation for policy answers.
+ * Queries Qdrant vector store with tenant and role isolation for verified policy answers.
  *
  * @param {Object} args
  * @param {string} args.query Search query or question
@@ -91,7 +93,7 @@ export async function getLeaveBalance(args = {}, context = {}) {
 
   const targetUserId = args.userId && typeof args.userId === 'string' ? args.userId.trim() : user.userId;
 
-  // RBAC Check: Non-admins cannot inspect other users' balances
+  // RBAC Check: Non-privileged users cannot inspect other users' balances
   if (targetUserId !== user.userId) {
     const privilegedRoles = ['super_admin', 'org_admin', 'hr_admin', 'manager'];
     if (!privilegedRoles.includes(user.role)) {
@@ -105,7 +107,7 @@ export async function getLeaveBalance(args = {}, context = {}) {
   const employeeDoc = await User.findOne({
     userId: targetUserId,
     orgId: user.orgId,
-  }).select('userId name email department role leaveBalances');
+  }).select('userId name email department role leaveBalances').lean();
 
   if (!employeeDoc) {
     throw new ToolExecutionError(`User '${targetUserId}' was not found in this organization.`, 404);
@@ -123,11 +125,11 @@ export async function getLeaveBalance(args = {}, context = {}) {
 
 /**
  * 3. getMyTickets (Safe Tool)
- * Queries MongoDB for the employee's active or past support tickets.
+ * Retrieves tickets scoped by tenant and caller role using the consolidated ticket service.
  *
  * @param {Object} args
  * @param {string} [args.status] Optional filter: 'OPEN', 'IN_PROGRESS', 'RESOLVED', 'ALL'
- * @param {number} [args.limit=10] Max records to return
+ * @param {number} [args.limit=10] Max records to return (1-50)
  * @param {Object} context Execution context with authenticated user
  * @returns {Promise<Object>} List of support tickets
  */
@@ -138,42 +140,41 @@ export async function getMyTickets(args = {}, context = {}) {
     throw new ToolExecutionError('Authenticated user context is required.');
   }
 
-  const query = {
-    orgId: user.orgId,
-    userId: user.userId,
-  };
+  try {
+    const maxLimit = Math.min(Math.max(parseInt(args.limit, 10) || 10, 1), 50);
+    const { tickets } = await getTicketsService({
+      user,
+      status: args.status,
+      limit: maxLimit,
+      userId: user.userId,
+    });
 
-  if (args.status && typeof args.status === 'string' && args.status.toUpperCase() !== 'ALL') {
-    query.status = args.status.toUpperCase();
+    return {
+      tool: 'getMyTickets',
+      userId: user.userId,
+      count: tickets.length,
+      tickets: tickets.map((t) => ({
+        ticketId: t.ticketId,
+        title: t.title,
+        description: t.description,
+        category: t.category,
+        priority: t.priority,
+        status: t.status,
+        assignedTo: t.assignedTo || null,
+        createdAt: t.createdAt,
+      })),
+    };
+  } catch (err) {
+    if (err instanceof TicketServiceError) {
+      throw new ToolExecutionError(err.message, err.statusCode || 400);
+    }
+    throw err;
   }
-
-  const maxLimit = Math.min(Math.max(parseInt(args.limit, 10) || 10, 1), 50);
-
-  const tickets = await Ticket.find(query)
-    .sort({ createdAt: -1 })
-    .limit(maxLimit)
-    .lean();
-
-  return {
-    tool: 'getMyTickets',
-    userId: user.userId,
-    count: tickets.length,
-    tickets: tickets.map((t) => ({
-      ticketId: t.ticketId,
-      title: t.title,
-      description: t.description,
-      category: t.category,
-      priority: t.priority,
-      status: t.status,
-      assignedTo: t.assignedTo || null,
-      createdAt: t.createdAt,
-    })),
-  };
 }
 
 /**
  * 4. createTicket (Write Tool)
- * Directly creates and inserts a new support ticket into MongoDB.
+ * Creates a new support ticket by delegating to the unified ticket service.
  *
  * @param {Object} args
  * @param {string} args.title Summary of the issue
@@ -191,82 +192,37 @@ export async function createTicket(args = {}, context = {}) {
     throw new ToolExecutionError('Authenticated user context is required.');
   }
 
-  if (!title || typeof title !== 'string' || title.trim().length === 0) {
-    throw new ToolExecutionError("Argument 'title' is required to create a ticket.");
-  }
+  try {
+    const ticket = await createTicketService({
+      user,
+      ticketData: {
+        title,
+        description,
+        category,
+        priority,
+      },
+    });
 
-  const normalizedCategory = category ? category.toUpperCase() : 'GENERAL';
-  if (!TICKET_CATEGORIES.includes(normalizedCategory)) {
-    throw new ToolExecutionError(
-      `Invalid ticket category '${category}'. Allowed: ${TICKET_CATEGORIES.join(', ')}`
-    );
-  }
-
-  const normalizedPriority = priority ? priority.toUpperCase() : 'MEDIUM';
-  if (!TICKET_PRIORITIES.includes(normalizedPriority)) {
-    throw new ToolExecutionError(
-      `Invalid ticket priority '${priority}'. Allowed: ${TICKET_PRIORITIES.join(', ')}`
-    );
-  }
-
-  const randomSuffix = crypto.randomBytes(3).toString('hex').toUpperCase();
-  const ticketId = `TICK-${Date.now().toString(36).toUpperCase()}-${randomSuffix}`;
-
-  const ticket = await Ticket.create({
-    ticketId,
-    orgId: user.orgId,
-    userId: user.userId,
-    title: title.trim(),
-    description: description ? description.trim() : '',
-    category: normalizedCategory,
-    priority: normalizedPriority,
-    status: 'OPEN',
-  });
-
-  // Refresh this user's ticket lists and the org-wide admin view
-  await invalidateTicketCaches({ orgId: user.orgId, userId: user.userId });
-
-  await notify('TICKET_CREATED', {
-    orgId: user.orgId,
-    actor: { userId: user.userId, name: user.name },
-    ticket: { ticketId: ticket.ticketId, title: ticket.title, category: ticket.category, priority: ticket.priority },
-  });
-
-  recordAuditLog({
-    orgId: user.orgId,
-    actor: {
-      userId: user.userId,
-      name: user.name || user.userId,
-      role: user.role,
-    },
-    action: 'TICKET_CREATED_VIA_COPILOT',
-    entity: {
-      type: 'ticket',
-      id: ticket.ticketId,
-    },
-    changes: {
-      after: {
+    return {
+      tool: 'createTicket',
+      success: true,
+      ticket: {
+        ticketId: ticket.ticketId,
         title: ticket.title,
+        description: ticket.description,
         category: ticket.category,
         priority: ticket.priority,
+        status: ticket.status,
+        createdAt: ticket.createdAt,
       },
-    },
-  }).catch(() => {});
-
-  return {
-    tool: 'createTicket',
-    success: true,
-    ticket: {
-      ticketId: ticket.ticketId,
-      title: ticket.title,
-      description: ticket.description,
-      category: ticket.category,
-      priority: ticket.priority,
-      status: ticket.status,
-      createdAt: ticket.createdAt,
-    },
-    message: `Ticket ${ticket.ticketId} created successfully in ${normalizedCategory} category.`,
-  };
+      message: `Ticket ${ticket.ticketId} created successfully in ${ticket.category} category.`,
+    };
+  } catch (err) {
+    if (err instanceof TicketServiceError) {
+      throw new ToolExecutionError(err.message, err.statusCode || 400);
+    }
+    throw err;
+  }
 }
 
 /**
@@ -308,7 +264,7 @@ export async function applyLeave(args = {}, context = {}) {
     throw new ToolExecutionError("Argument 'days' must be a positive integer greater than zero.");
   }
 
-  if (!startDate || typeof startDate !== 'string') {
+  if (!startDate || typeof startDate !== 'string' || !startDate.trim()) {
     throw new ToolExecutionError("Argument 'startDate' is required (YYYY-MM-DD).");
   }
 
@@ -316,7 +272,7 @@ export async function applyLeave(args = {}, context = {}) {
   const employeeDoc = await User.findOne({
     userId: user.userId,
     orgId: user.orgId,
-  }).select('userId name email department leaveBalances');
+  }).select('userId name email department leaveBalances').lean();
 
   if (!employeeDoc) {
     throw new ToolExecutionError(`User '${user.userId}' not found in organization.`, 404);
@@ -337,6 +293,7 @@ export async function applyLeave(args = {}, context = {}) {
     type: ACTION_TYPES.APPLY_LEAVE,
     userId: user.userId,
     orgId: user.orgId,
+    targetEntity: { type: 'user', id: user.userId },
     payload: {
       leaveType: normalizedType,
       days: parsedDays,
@@ -348,7 +305,7 @@ export async function applyLeave(args = {}, context = {}) {
       userName: employeeDoc.name,
       department: employeeDoc.department,
     },
-    summary: `Apply for ${parsedDays} day(s) of ${normalizedType} leave (${startDate}${endDate && endDate !== startDate ? ` to ${endDate}` : ''})`,
+    summary: `Apply for ${parsedDays} day(s) of ${normalizedType} leave (${startDate.trim()}${endDate && endDate.trim() !== startDate.trim() ? ` to ${endDate.trim()}` : ''})`,
     client: redisClient,
   });
 
@@ -422,6 +379,7 @@ export async function requestHardwareUpgrade(args = {}, context = {}) {
     type: ACTION_TYPES.REQUEST_HARDWARE_UPGRADE,
     userId: user.userId,
     orgId: user.orgId,
+    targetEntity: { type: 'hardware_requisition', id: preferredModel.trim() },
     payload: {
       assetType: normalizedAssetType,
       preferredModel: preferredModel.trim(),
@@ -453,7 +411,7 @@ export async function requestHardwareUpgrade(args = {}, context = {}) {
 
 /**
  * Gemini Function Calling Declarations Schema
- * Enables Gemini Models (gemini-3.8-flash, gemini-3.5-flash) to trigger autonomous function calling.
+ * Enables Gemini Models to trigger autonomous function calling.
  */
 export const TOOL_DEFINITIONS = [
   {
@@ -601,11 +559,18 @@ export const TOOL_DEFINITIONS = [
  *
  * @param {string} toolName Name of the tool to execute
  * @param {Object} args Tool argument payload
- * @param {Object} context Execution context (user, redis, qdrant, embeddings)
+ * @param {Object} context Execution context (user, redisClient, qdrantClient, embeddingProvider)
  * @returns {Promise<Object>} Execution result
  */
 export async function executeTool(toolName, args = {}, context = {}) {
-  const startTime = Date.now();
+  if (!toolName || typeof toolName !== 'string') {
+    throw new ToolExecutionError('toolName is required.');
+  }
+
+  if (!context.user || !context.user.orgId || !context.user.userId) {
+    throw new ToolExecutionError('Authenticated user context with orgId and userId is required.');
+  }
+
   let result;
   switch (toolName) {
     case 'searchPolicies':
@@ -630,24 +595,22 @@ export async function executeTool(toolName, args = {}, context = {}) {
       throw new InvalidToolError(toolName);
   }
 
-  if (context.user?.orgId) {
-    recordAuditLog({
-      orgId: context.user.orgId,
-      actor: {
-        userId: context.user.userId,
-        name: context.user.name || context.user.userId,
-        role: context.user.role || 'employee',
-      },
-      action: `TOOL_EXECUTED:${toolName}`,
-      entity: {
-        type: 'tool',
-        id: toolName,
-      },
-      changes: {
-        after: { args },
-      },
-    }).catch(() => {});
-  }
+  recordAuditLog({
+    orgId: context.user.orgId,
+    actor: {
+      userId: context.user.userId,
+      name: context.user.name || context.user.userId,
+      role: context.user.role || 'employee',
+    },
+    action: `TOOL_EXECUTED:${toolName}`,
+    entity: {
+      type: 'tool',
+      id: toolName,
+    },
+    changes: {
+      after: { args },
+    },
+  }).catch(() => {});
 
   return result;
 }

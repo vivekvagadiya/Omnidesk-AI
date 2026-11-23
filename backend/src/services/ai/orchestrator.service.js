@@ -443,16 +443,24 @@ async function executeToolIntent({
   let text = '';
   let stagedAction = null;
 
-  const toolResult = await executeTool(
-    detectedTool.tool,
-    detectedTool.args || {},
-    {
-      user,
-      redisClient,
-      embeddingProvider: customEmbeddingProvider,
-      qdrantClient,
-    }
-  );
+  let toolResult;
+  try {
+    toolResult = await executeTool(
+      detectedTool.tool,
+      detectedTool.args || {},
+      {
+        user,
+        redisClient,
+        embeddingProvider: customEmbeddingProvider,
+        qdrantClient,
+      }
+    );
+  } catch (err) {
+    return {
+      text: err.message || 'Unable to execute requested tool action.',
+      stagedAction: null,
+    };
+  }
 
   if (toolResult.isConsequential && toolResult.requiresConfirmation) {
     stagedAction = {
