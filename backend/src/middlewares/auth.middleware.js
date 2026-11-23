@@ -1,3 +1,4 @@
+import { config } from '../config/environment.js';
 import { verifyAccessToken } from '../utils/jwt.js';
 import { User } from '../models/User.model.js';
 import { errorResponse } from '../utils/apiResponse.js';
@@ -44,14 +45,31 @@ export async function authenticateJwt(req, res, next) {
           req.user = typeof user.toSafeObject === 'function' ? user.toSafeObject() : user;
           req.userDoc = user;
           return next();
+        } else if (config.nodeEnv === 'production' || User.db?.readyState === 1) {
+          // When DB is active or in production, non-existent user must be rejected
+          return errorResponse(res, {
+            statusCode: 401,
+            message: 'User account not found or has been deactivated.',
+          });
         }
       } catch (dbErr) {
-        // If DB query fails and DB is not connected, fall through to decoded token
-        if (User.db?.readyState === 1) throw dbErr;
+        if (config.nodeEnv === 'production' || User.db?.readyState === 1) {
+          return errorResponse(res, {
+            statusCode: 503,
+            message: 'Authentication service unavailable: Database connection required.',
+            error: dbErr.message,
+          });
+        }
       }
+    } else if (config.nodeEnv === 'production') {
+      // In production, database connection is strictly required for authentication
+      return errorResponse(res, {
+        statusCode: 503,
+        message: 'Authentication service unavailable: Database connection required.',
+      });
     }
 
-    // Fast-path / fallback when testing without live DB
+    // Fast-path / fallback strictly when running offline unit tests without live DB
     req.user = decoded;
     next();
   } catch (err) {

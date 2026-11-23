@@ -14,7 +14,25 @@ export const SESSION_TTL_SECONDS = 86400; // 24-hour session TTL
 export const MAX_SESSION_MESSAGES = 20; // Last 10 turns (user + assistant)
 const REQUEST_TIMEOUT_MS = 25000; // 25 seconds timeout for LLM generation
 
-// In-memory fallback session store for offline/non-production environments
+/**
+ * In-memory fallback session store for offline/non-production environments.
+ *
+ * ARCHITECTURAL LIMITATIONS & PRODUCTION CONSTRAINTS:
+ * 1. Process-Local / Non-Distributed: State is held in-process within this Node.js instance.
+ *    In clustered or horizontally scaled production deployments, subsequent chat turns
+ *    routed across different instances will NOT observe this conversation history.
+ * 2. Volatile / Ephemeral: Conversation history stored here is immediately lost on process
+ *    restart, unhandled exception, or redeployment.
+ * 3. Memory Pressure / OOM Risk: Prolonged Redis outages under heavy traffic will accumulate
+ *    active session arrays in heap memory despite the periodic 10-minute cleanup timer.
+ * 4. Cache-Tier Context Only: Conversation history is ephemeral sliding-window context for
+ *    the LLM. MongoDB remains the authoritative durable storage for business entities (tickets,
+ *    audit logs, notifications).
+ *
+ * In production (NODE_ENV === 'production'), Redis is the required distributed storage.
+ * If Redis becomes unavailable, the system logs prominent error alerts and operates in a
+ * degraded process-local mode with these documented limitations.
+ */
 const inMemorySessionStore = new Map();
 
 // Periodic cleanup of in-memory fallback sessions

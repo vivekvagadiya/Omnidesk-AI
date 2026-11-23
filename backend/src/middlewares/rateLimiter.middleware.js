@@ -18,7 +18,19 @@ end
 return { count, ttl }
 `;
 
-// In-memory fallback map: key -> { count, resetTime }
+/**
+ * In-memory fallback map: key -> { count, resetTime }
+ *
+ * Classification: Category 2 (Safe for temporary non-critical operation)
+ *
+ * Rationale & Architectural Characteristics:
+ * 1. Temporary Degradation: Used as a resilient fallback if Redis drops.
+ * 2. Process-Local Throttling: Each Node.js instance independently enforces the rate limit window.
+ *    While cross-instance coordination is lost during a Redis outage, requests are still bounded
+ *    per instance rather than failing open or dropping legitimate traffic.
+ * 3. Memory Safety: Automatically sweeps expired keys every 5 minutes and runs unreferenced
+ *    to prevent blocking event loop shutdown during tests.
+ */
 const memoryStore = new Map();
 
 // Periodic cleanup of expired memory entries every 5 minutes
