@@ -595,36 +595,14 @@ async function executeApplyLeave({ stagedAction, user }) {
   const targetUserId = stagedAction.userId;
   const leaveField = `leaveBalances.${leaveType}`;
 
-  // 1. Atomically decrement leave balance in MongoDB
-  const updatedUser = await User.findOneAndUpdate(
-    {
-      userId: targetUserId,
-      orgId: stagedAction.orgId,
-      [leaveField]: { $gte: days },
-    },
-    {
-      $inc: { [leaveField]: -days },
-    },
-    { new: true }
-  );
+  // 1. Create resolved Ticket audit record FIRST with unique stagedActionId constraint.
+  // Acts as the durable atomic database-level idempotency anchor:
+  // If another concurrent request or retry executes this action, MongoDB rejects it with E11000.
+  const randomSuffix = crypto.randomBytes(3).toString('hex').toUpperCase();
+  const ticketId = `LEAVE-${Date.now().toString(36).toUpperCase()}-${randomSuffix}`;
 
-  if (!updatedUser) {
-    const existingUser = await User.findOne({ userId: targetUserId, orgId: stagedAction.orgId });
-    if (!existingUser) {
-      throw new HITLError(`Employee '${targetUserId}' not found in organization.`);
-    }
-    const available = existingUser.leaveBalances?.[leaveType] ?? 0;
-    throw new HITLError(
-      `Insufficient leave balance to complete approval. Requested ${days} days, but only ${available} days remain.`
-    );
-  }
-
-  // 2. Create resolved Ticket audit record
   let leaveTicket;
   try {
-    const randomSuffix = crypto.randomBytes(3).toString('hex').toUpperCase();
-    const ticketId = `LEAVE-${Date.now().toString(36).toUpperCase()}-${randomSuffix}`;
-
     leaveTicket = await Ticket.create({
       ticketId,
       orgId: stagedAction.orgId,
@@ -645,13 +623,41 @@ async function executeApplyLeave({ stagedAction, user }) {
       },
     });
   } catch (ticketErr) {
-    // Compensating rollback if ticket creation fails: restore deducted balance
-    console.error(`❌ [HITL Gatekeeper] Ticket creation failed after leave deduction. Rolling back balance: ${ticketErr.message}`);
-    await User.updateOne(
-      { userId: targetUserId, orgId: stagedAction.orgId },
-      { $inc: { [leaveField]: days } }
-    ).catch(() => {});
+    if (ticketErr.code === 11000 || (ticketErr.name === 'MongoServerError' && ticketErr.code === 11000)) {
+      throw new ActionNotFoundError('Action token has already been executed.');
+    }
     throw ticketErr;
+  }
+
+  // 2. Atomically decrement leave balance in MongoDB using conditional update
+  let updatedUser;
+  try {
+    updatedUser = await User.findOneAndUpdate(
+      {
+        userId: targetUserId,
+        orgId: stagedAction.orgId,
+        [leaveField]: { $gte: days },
+      },
+      {
+        $inc: { [leaveField]: -days },
+      },
+      { new: true }
+    );
+
+    if (!updatedUser) {
+      const existingUser = await User.findOne({ userId: targetUserId, orgId: stagedAction.orgId });
+      if (!existingUser) {
+        throw new HITLError(`Employee '${targetUserId}' not found in organization.`);
+      }
+      const available = existingUser.leaveBalances?.[leaveType] ?? 0;
+      throw new HITLError(
+        `Insufficient leave balance to complete approval. Requested ${days} days, but only ${available} days remain.`
+      );
+    }
+  } catch (userErr) {
+    // If leave balance deduction fails, roll back ticket creation
+    await Ticket.deleteOne({ ticketId: leaveTicket.ticketId, orgId: stagedAction.orgId }).catch(() => {});
+    throw userErr;
   }
 
   const executionResult = {
@@ -696,7 +702,7 @@ async function executeApplyLeave({ stagedAction, user }) {
 
 /**
  * Execute hardware upgrade request mutation:
- * 1. Creates an IT support ticket in MongoDB to track hardware requisition workflow.
+ * 1. Creates an IT support ticket in MongoDB with unique stagedActionId constraint.
  * 2. Invalidates ticket caches and notifies IT administrators.
  */
 async function executeRequestHardwareUpgrade({ stagedAction, user }) {
@@ -705,25 +711,33 @@ async function executeRequestHardwareUpgrade({ stagedAction, user }) {
   const randomSuffix = crypto.randomBytes(3).toString('hex').toUpperCase();
   const ticketId = `HW-${Date.now().toString(36).toUpperCase()}-${randomSuffix}`;
 
-  const hwTicket = await Ticket.create({
-    ticketId,
-    orgId: stagedAction.orgId,
-    userId: stagedAction.userId,
-    title: `Hardware Upgrade: ${preferredModel} (${assetType})`,
-    description: `Hardware requisition confirmed by user.\nItem: ${preferredModel}\nCategory: ${assetType}\nUrgency: ${urgency || 'MEDIUM'}\nReason: ${reason}`,
-    category: 'IT_HARDWARE',
-    priority: urgency || 'MEDIUM',
-    status: 'OPEN',
-    stagedActionId: stagedAction.actionId,
-    metadata: {
-      assetType,
-      preferredModel,
-      reason,
-      urgency,
-      confirmedBy: user.userId,
-      confirmedAt: new Date().toISOString(),
-    },
-  });
+  let hwTicket;
+  try {
+    hwTicket = await Ticket.create({
+      ticketId,
+      orgId: stagedAction.orgId,
+      userId: stagedAction.userId,
+      title: `Hardware Upgrade: ${preferredModel} (${assetType})`,
+      description: `Hardware requisition confirmed by user.\nItem: ${preferredModel}\nCategory: ${assetType}\nUrgency: ${urgency || 'MEDIUM'}\nReason: ${reason}`,
+      category: 'IT_HARDWARE',
+      priority: urgency || 'MEDIUM',
+      status: 'OPEN',
+      stagedActionId: stagedAction.actionId,
+      metadata: {
+        assetType,
+        preferredModel,
+        reason,
+        urgency,
+        confirmedBy: user.userId,
+        confirmedAt: new Date().toISOString(),
+      },
+    });
+  } catch (ticketErr) {
+    if (ticketErr.code === 11000 || (ticketErr.name === 'MongoServerError' && ticketErr.code === 11000)) {
+      throw new ActionNotFoundError('Action token has already been executed.');
+    }
+    throw ticketErr;
+  }
 
   // Invalidate ticket cache (non-fatal)
   try {
@@ -913,7 +927,16 @@ export async function consumeActionToken({
     }
 
     // 8. Handle APPROVAL: Execute database mutations
-    const executionResult = await executeApprovedAction({ stagedAction: staged, user });
+    let executionResult;
+    try {
+      executionResult = await executeApprovedAction({ stagedAction: staged, user });
+    } catch (execErr) {
+      if (execErr.code === 11000 || (execErr.name === 'MongoServerError' && execErr.code === 11000)) {
+        await deleteStagedAction(cleanActionId, client);
+        throw new ActionNotFoundError('Action token has already been executed.');
+      }
+      throw execErr;
+    }
 
     // 9. Single-Use Consumption: Expunge action token immediately to prevent replay attacks
     await deleteStagedAction(cleanActionId, client);

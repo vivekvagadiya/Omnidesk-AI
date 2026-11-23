@@ -138,33 +138,42 @@ export function buildSessionKey({ orgId, userId, sessionId }) {
 export async function resolveSessionKey(target, user = null, client = null) {
   if (!target) return null;
 
+  let sessionId = null;
+  let orgId = null;
+  let userId = null;
+
   if (typeof target === 'object' && target !== null) {
-    const sessionId = target.sessionId || target.id;
-    const orgId = target.orgId || target.user?.orgId || user?.orgId;
-    const userId = target.userId || target.user?.userId || user?.userId;
-    if (orgId && userId && sessionId) {
-      return buildSessionKey({ orgId, userId, sessionId });
-    }
-    if (config.nodeEnv === 'production') {
-      throw new SessionOwnershipError(
-        'Cannot resolve session key: orgId and userId are strictly required in production.'
-      );
-    }
+    sessionId = target.sessionId || target.id;
+    orgId = target.orgId || target.user?.orgId || user?.orgId;
+    userId = target.userId || target.user?.userId || user?.userId;
+  } else {
+    sessionId = String(target).trim();
+    orgId = user?.orgId;
+    userId = user?.userId;
+  }
+
+  if (orgId && userId && sessionId) {
     return buildSessionKey({ orgId, userId, sessionId });
   }
 
-  const cleanSessionId = String(target).trim();
-  if (user?.orgId && user?.userId) {
-    return buildSessionKey({ orgId: user.orgId, userId: user.userId, sessionId: cleanSessionId });
+  // In production, strictly require authenticated identity (orgId and userId).
+  // The Redis ownership registry must NEVER replace authenticated identity in production.
+  if (config.nodeEnv === 'production') {
+    throw new SessionOwnershipError(
+      `Cannot resolve session key for '${sessionId || 'unknown'}': Authenticated user context with orgId and userId is strictly required in production.`
+    );
   }
 
-  // Check in-memory ownership registry
+  // Non-production fallback only (dev / test backward compatibility):
+  const cleanSessionId = String(sessionId || '').trim();
+
+  // Check in-memory ownership registry (non-prod)
   const memOwner = inMemorySessionOwners.get(cleanSessionId);
   if (memOwner?.orgId && memOwner?.userId) {
     return buildSessionKey({ orgId: memOwner.orgId, userId: memOwner.userId, sessionId: cleanSessionId });
   }
 
-  // Check Redis ownership registry
+  // Check Redis ownership registry (non-prod)
   if (client && (client.isReady || client.isOpen)) {
     try {
       const rawOwner = await client.get(`session:owner:${cleanSessionId}`);
@@ -175,14 +184,8 @@ export async function resolveSessionKey(target, user = null, client = null) {
         }
       }
     } catch {
-      // Fall through to error in production or dev fallback
+      // Fall through to dev unscoped key
     }
-  }
-
-  if (config.nodeEnv === 'production') {
-    throw new SessionOwnershipError(
-      `Cannot resolve session key for '${cleanSessionId}': orgId and userId are strictly required in production.`
-    );
   }
 
   return `session:${cleanSessionId}:messages`;
@@ -880,9 +883,11 @@ async function finalizeTurn({
   });
 
   // 3. Append Turns to Redis Session Memory (scoped by orgId + userId + sessionId)
-  const sessionTarget = user?.orgId && user?.userId
-    ? { sessionId, orgId: user.orgId, userId: user.userId }
-    : sessionId;
+  const sessionTarget = {
+    sessionId,
+    orgId: user?.orgId,
+    userId: user?.userId,
+  };
 
   await appendSessionMessage(sessionTarget, { role: 'user', text: rawMessage }, redisClient, user);
   await appendSessionMessage(sessionTarget, { role: 'model', text: unmaskedAnswer }, redisClient, user);

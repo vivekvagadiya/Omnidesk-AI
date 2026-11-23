@@ -88,4 +88,15 @@ const ticketSchema = new mongoose.Schema(
   }
 );
 
+// Enforce durable idempotency for staged actions at the database layer.
+// Ensures that concurrent executions or retries of the same stagedActionId
+// cannot create duplicate tickets or mutations under any circumstances.
+ticketSchema.index(
+  { orgId: 1, stagedActionId: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { stagedActionId: { $type: 'string' } },
+  }
+);
+
 export const Ticket = mongoose.model('Ticket', ticketSchema);
