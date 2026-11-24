@@ -11,7 +11,12 @@ export async function connectDB() {
     return mongoose.connection;
   }
 
-  const { uri } = config.mongodb;
+  const uri = config.mongodb?.uri;
+  if (!uri) {
+    const error = new Error('MongoDB connection URI is not configured.');
+    console.error(`❌ [MongoDB] Connection failed: ${error.message}`);
+    throw error;
+  }
 
   try {
     const conn = await mongoose.connect(uri, {
@@ -50,8 +55,7 @@ export async function connectDB() {
     return conn;
   } catch (error) {
     console.error(`❌ [MongoDB] Connection failed (${uri}):`, error.message);
-    console.warn('⚠️  [MongoDB] Running in offline mode. Ensure MongoDB is running locally on 27017 or provide MONGODB_URI in .env');
-    return null;
+    throw error;
   }
 }
 

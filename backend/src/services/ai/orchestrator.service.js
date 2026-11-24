@@ -5,11 +5,17 @@ import { getRedisClient } from "../../config/redis.js";
 import { retrievePolicyContext } from "../rag/retrieval.service.js";
 import { packageResponseWithCitations } from "../rag/citation.service.js";
 import { maskPII, unmaskPII } from "./piiMasker.service.js";
-import { executeTool } from "../tools/toolRegistry.service.js";
+import {
+  executeTool,
+  TOOL_DEFINITIONS,
+  SAFE_TOOLS,
+  MUTATION_TOOLS,
+  CONSEQUENTIAL_TOOLS,
+} from "../tools/toolRegistry.service.js";
 import { recordAuditLog } from "../audit/audit.service.js";
 
-export const PRIMARY_MODEL = "gemini-3.5-flash";
-export const FALLBACK_MODEL = "gemini-2.0-flash";
+export const PRIMARY_MODEL = config.gemini?.primaryModel || "gemini-3.8-flash";
+export const FALLBACK_MODEL = config.gemini?.fallbackModel || "gemini-3.6-flash";
 
 export const SESSION_TTL_SECONDS = 86400; // 24-hour session TTL
 export const MAX_SESSION_MESSAGES = 20; // Last 10 turns (user + assistant)
@@ -84,6 +90,125 @@ export class SessionOwnershipError extends Error {
     this.name = "SessionOwnershipError";
     this.statusCode = 403;
   }
+}
+
+/**
+ * Custom Error for AI Provider Failures (Rate Limits, Unavailable, or Invocations)
+ */
+export class AiProviderError extends Error {
+  constructor(
+    message,
+    { statusCode = 503, originalError = null, code = "AI_PROVIDER_ERROR" } = {},
+  ) {
+    super(message);
+    this.name = "AiProviderError";
+    this.statusCode = statusCode;
+    this.code = code;
+    this.originalError = originalError;
+  }
+}
+
+/**
+ * Sanitize error messages originating from LLM providers (e.g. Google Gemini).
+ * Prevents leaking raw API JSON structures, quota violation links, developer URLs,
+ * and internal stack traces to client responses.
+ *
+ * @param {Error|string} err
+ * @returns {string} Human-friendly error message suitable for frontend display
+ */
+export function sanitizeAiErrorMessage(err) {
+  if (!err) return "The AI assistant is temporarily unavailable. Please try again in a moment.";
+
+  let rawMessage = typeof err === "string" ? err : err.message || "";
+  let statusCode = err.status || err.statusCode || err.code;
+
+  // If rawMessage is stringified JSON from Google GenAI SDK (e.g. {"error":{...}}), parse it
+  if (typeof rawMessage === "string") {
+    const trimmed = rawMessage.trim();
+    if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (parsed.error) {
+          statusCode = statusCode || parsed.error.code;
+          rawMessage = parsed.error.message || rawMessage;
+        }
+      } catch {
+        // Not valid JSON, continue with rawMessage
+      }
+    }
+  }
+
+  const lower = (rawMessage || "").toLowerCase();
+
+  // 1. Quota exceeded or Rate limited (429 / RESOURCE_EXHAUSTED)
+  if (
+    statusCode === 429 ||
+    lower.includes("429") ||
+    lower.includes("quota") ||
+    lower.includes("resource_exhausted") ||
+    lower.includes("rate limit") ||
+    lower.includes("requests per day")
+  ) {
+    return "The AI assistant is currently experiencing high demand or quota limits. Please try again in a few moments.";
+  }
+
+  // 2. High demand / Service unavailable (503 / UNAVAILABLE)
+  if (
+    statusCode === 503 ||
+    lower.includes("503") ||
+    lower.includes("unavailable") ||
+    lower.includes("high demand") ||
+    lower.includes("temporary spike")
+  ) {
+    return "The AI assistant is temporarily busy due to high demand. Please wait a moment and try again.";
+  }
+
+  // 3. Timeout (504 / Deadline Exceeded)
+  if (
+    statusCode === 504 ||
+    lower.includes("504") ||
+    lower.includes("timeout") ||
+    lower.includes("timed out") ||
+    lower.includes("deadline_exceeded")
+  ) {
+    return "The AI request took too long to complete. Please try your question again.";
+  }
+
+  // 4. Network or connectivity issues
+  if (
+    lower.includes("econnreset") ||
+    lower.includes("fetch failed") ||
+    lower.includes("enotfound") ||
+    lower.includes("etimedout")
+  ) {
+    return "Unable to connect to the AI service. Please check network connectivity and try again.";
+  }
+
+  // 5. Auth / API key
+  if (
+    statusCode === 401 ||
+    statusCode === 403 ||
+    lower.includes("api key") ||
+    lower.includes("api_key") ||
+    lower.includes("unauthenticated") ||
+    lower.includes("permission_denied")
+  ) {
+    return "The AI service is currently misconfigured or unauthorized. Please contact your system administrator.";
+  }
+
+  // If the message is short, clean prose without URLs, braces, or stack traces, keep it:
+  if (
+    typeof rawMessage === "string" &&
+    rawMessage.length < 120 &&
+    !rawMessage.includes("http") &&
+    !rawMessage.includes("{") &&
+    !rawMessage.includes("at ") &&
+    !rawMessage.includes("node_modules")
+  ) {
+    return rawMessage;
+  }
+
+  return "An unexpected error occurred while communicating with the AI service. Please try again.";
 }
 
 /**
@@ -619,29 +744,55 @@ export function buildSystemInstructions({ user, evidenceContext = "" }) {
     "--- ROLE-BASED ACCESS CONTROL (RBAC) GOVERNANCE ---",
     selectedRoleGuidance,
     "",
+    "--- FUNCTION CALLING & OPERATIONAL TOOL RULES ---",
+    "1. When the user asks about company policies, leave rules, IT guidelines, or benefits, invoke the `searchPolicies` tool.",
+    "2. When the user asks about their own leave balance, invoke the `getLeaveBalance` tool.",
+    "3. When the user asks to view or check their open/all support tickets, invoke the `getMyTickets` tool.",
+    "4. When the user requests to create or file a support ticket, invoke the `createTicket` tool.",
+    "5. When the user asks to apply for leave, invoke the `applyLeave` tool.",
+    "6. When the user requests a hardware upgrade or new equipment, invoke the `requestHardwareUpgrade` tool.",
+    "7. For multi-faceted requests (e.g. 'check my leave balance and show my open tickets'), invoke all appropriate tools.",
+    "8. If no tool is needed (e.g. greetings, general conversation, or clarifying questions), respond normally without invoking tools.",
+    "",
     "--- ZERO-HALLUCINATION & CITATION RULES ---",
-    "1. When verified policy excerpts are provided below, answer using ONLY that evidence.",
+    "1. When verified policy excerpts are returned via `searchPolicies` (or provided in evidence), answer using ONLY that evidence.",
     "2. You MUST cite references using in-text numbered badges like [1], [2], corresponding to the policy sources.",
-    '3. If no policy evidence is provided or the topic is not covered, state plainly: "No company policy covers this topic. Would you like me to raise an HR or IT ticket for assistance?"',
+    '3. If searchPolicies returns no grounding or no relevant policy covers the topic, state plainly: "No company policy covers this topic. Would you like me to raise an HR or IT ticket for assistance?"',
     "4. Never fabricate policies, entitlement quotas, or corporate rules.",
     "",
-    evidenceContext ||
-      "No verified organization policies attached for this query.",
-  ].join("\n");
+    "--- HUMAN-IN-THE-LOOP (HITL) WORKFLOW ---",
+    "1. Consequential tools (`applyLeave`, `requestHardwareUpgrade`) STAGE an action for confirmation; they DO NOT deduct balance or provision hardware immediately.",
+    "2. When a tool stages an action, explain clearly to the user that their request has been staged and prompt them to confirm or reject using the interactive approval card.",
+    "",
+    evidenceContext || "",
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 /**
  * Format multi-turn conversation history into Gemini API contents structure
+ * Preserves structured tool parts (functionCall, functionResponse) across conversation turns.
  *
- * @param {Array<{ role: string, text: string }>} historyTurns
+ * @param {Array<{ role: string, text?: string, parts?: Array<Object> }>} historyTurns
  * @param {string} currentMessage Masked user query
- * @returns {Array<{ role: string, parts: Array<{ text: string }> }>}
+ * @returns {Array<{ role: string, parts: Array<Object> }>}
  */
 export function formatGeminiContents(historyTurns = [], currentMessage = "") {
-  const contents = (historyTurns || []).map((turn) => ({
-    role: turn.role === "model" || turn.role === "assistant" ? "model" : "user",
-    parts: [{ text: turn.text || "" }],
-  }));
+  const contents = (historyTurns || []).map((turn) => {
+    if (Array.isArray(turn.parts) && turn.parts.length > 0) {
+      return {
+        role:
+          turn.role === "model" || turn.role === "assistant" ? "model" : "user",
+        parts: turn.parts,
+      };
+    }
+    return {
+      role:
+        turn.role === "model" || turn.role === "assistant" ? "model" : "user",
+      parts: [{ text: turn.text || "" }],
+    };
+  });
 
   if (currentMessage) {
     contents.push({
@@ -663,8 +814,20 @@ export function formatGeminiContents(historyTurns = [], currentMessage = "") {
  */
 export function isTransientOrRateLimitError(err) {
   if (!err) return false;
-  const msg = (err.message || "").toLowerCase();
-  const status = err.status || err.statusCode || err.code;
+  let msg = (err.message || "").toLowerCase();
+  let status = err.status || err.statusCode || err.code;
+
+  if (typeof err.message === "string" && err.message.trim().startsWith("{")) {
+    try {
+      const parsed = JSON.parse(err.message.trim());
+      if (parsed.error) {
+        status = status || parsed.error.code;
+        msg = (parsed.error.message || msg).toLowerCase();
+      }
+    } catch {
+      // ignore
+    }
+  }
 
   return (
     status === 429 ||
@@ -677,6 +840,7 @@ export function isTransientOrRateLimitError(err) {
     msg.includes("resource_exhausted") ||
     msg.includes("timeout") ||
     msg.includes("unavailable") ||
+    msg.includes("high demand") ||
     msg.includes("econnreset")
   );
 }
@@ -697,19 +861,21 @@ export function extractUsageMetadata(rawUsage) {
 }
 
 /**
- * Call Gemini API with timeout, transient fallback model retry, and real usage collection
+ * Call Gemini API with timeout, transient fallback model retry, tool declarations, and usage collection
  *
  * @param {Object} params
  * @param {Array} params.contents Formatted Gemini contents array
  * @param {string} params.systemInstruction System instruction string
+ * @param {Array} [params.tools=null] Optional Gemini functionDeclarations array
  * @param {boolean} [params.stream=false] Whether to stream tokens
  * @param {Function} [params.onToken] Token callback for streaming
  * @param {number} [params.timeoutMs=REQUEST_TIMEOUT_MS] Request timeout in ms
- * @returns {Promise<{ text: string, usageMetadata: Object|null }>}
+ * @returns {Promise<{ text: string, functionCalls: Array, usageMetadata: Object|null }>}
  */
-async function callGemini({
+export async function callGemini({
   contents,
   systemInstruction,
+  tools = null,
   stream = false,
   onToken = null,
   timeoutMs = REQUEST_TIMEOUT_MS,
@@ -724,9 +890,14 @@ async function callGemini({
     temperature: 0.2, // Low temperature for high factual accuracy
   };
 
+  if (Array.isArray(tools) && tools.length > 0) {
+    modelConfig.tools = [{ functionDeclarations: tools }];
+  }
+
   const executeModel = async (modelName) => {
     let accumulated = "";
     let rawUsage = null;
+    let functionCalls = [];
 
     if (stream) {
       const responseStream = await Promise.race([
@@ -760,6 +931,9 @@ async function callGemini({
         if (chunk.usageMetadata) {
           rawUsage = chunk.usageMetadata;
         }
+        if (chunk.functionCalls && chunk.functionCalls.length > 0) {
+          functionCalls.push(...chunk.functionCalls);
+        }
       }
     } else {
       const response = await Promise.race([
@@ -781,13 +955,24 @@ async function callGemini({
 
       accumulated =
         response.text?.trim() ||
-        response.candidates?.[0]?.content?.parts?.[0]?.text ||
+        response.candidates?.[0]?.content?.parts?.find((p) => p.text)?.text ||
         "";
+
+      functionCalls =
+        response.functionCalls ||
+        response.candidates?.[0]?.content?.parts
+          ?.filter((p) => p.functionCall)
+          ?.map((p) => p.functionCall) ||
+        [];
+
       rawUsage = response.usageMetadata;
+      var candidateContent = response.candidates?.[0]?.content || null;
     }
 
     return {
       text: accumulated,
+      functionCalls,
+      candidateContent: candidateContent || null,
       usageMetadata: extractUsageMetadata(rawUsage),
     };
   };
@@ -805,10 +990,20 @@ async function callGemini({
         console.error(
           `❌ [Orchestrator] Fallback model (${FALLBACK_MODEL}) also failed: ${fallbackErr.message}`,
         );
-        throw fallbackErr;
+        const safeMessage = sanitizeAiErrorMessage(fallbackErr);
+        throw new AiProviderError(safeMessage, {
+          statusCode: 503,
+          originalError: fallbackErr,
+          code: "AI_PROVIDER_UNAVAILABLE",
+        });
       }
     }
-    throw primaryErr;
+    const safeMessage = sanitizeAiErrorMessage(primaryErr);
+    throw new AiProviderError(safeMessage, {
+      statusCode: primaryErr.status || 500,
+      originalError: primaryErr,
+      code: "AI_PROVIDER_ERROR",
+    });
   }
 }
 
@@ -951,6 +1146,411 @@ async function executeToolIntent({
 }
 
 /**
+ * Helper to emit tokens to the SSE stream in word/whitespace chunks
+ *
+ * @param {string} text Full generated text
+ * @param {Function} onEvent SSE event callback
+ */
+export function emitTokensToStream(text, onEvent) {
+  if (!text || typeof onEvent !== "function") return;
+  const tokens = text.match(/\S+\s*/g) || [text];
+  for (const token of tokens) {
+    onEvent("token", { delta: token });
+  }
+}
+
+/**
+ * Friendly status message for tool execution SSE event
+ *
+ * @param {string} toolName
+ * @param {Object} [args={}]
+ * @returns {string} Status pill message
+ */
+export function getToolStatusMessage(toolName, args = {}) {
+  switch (toolName) {
+    case "searchPolicies":
+      return "Searching ABC Tech policy knowledge base in Qdrant...";
+    case "getLeaveBalance":
+      return "Fetching employee leave balances...";
+    case "getMyTickets":
+      return "Retrieving support tickets...";
+    case "createTicket":
+      return `Creating support ticket: "${args.title || "Support Request"}"...`;
+    case "applyLeave":
+      return `Staging leave application for ${args.days || 1} day(s) of ${args.leaveType || "casual"} leave...`;
+    case "requestHardwareUpgrade":
+      return `Staging hardware upgrade requisition for ${args.preferredModel || "hardware"}...`;
+    default:
+      return `Executing ${toolName}...`;
+  }
+}
+
+/**
+ * Execute a single function call with timeout and error trapping
+ *
+ * @param {Object} fc Function call { name, args, id }
+ * @param {Object} context Execution context (user, redisClient, embeddingProvider, qdrantClient)
+ * @returns {Promise<{ name: string, id?: string, response: Object, rawResult: Object|null }>}
+ */
+export async function executeSingleToolCall(fc, context) {
+  const timeoutMs = 15000;
+  const rawName = fc.name || "";
+  const cleanName = rawName.replace(/^default_api:/, "").replace(/^.*:/, "");
+
+  try {
+    const validTools = [
+      ...SAFE_TOOLS,
+      ...MUTATION_TOOLS,
+      ...CONSEQUENTIAL_TOOLS,
+    ];
+
+    if (!validTools.includes(cleanName)) {
+      return {
+        name: cleanName,
+        rawName,
+        id: fc.id,
+        response: {
+          error: true,
+          message: `Tool '${cleanName}' is not recognized or authorized.`,
+        },
+        rawResult: null,
+      };
+    }
+
+    let toolArgs = fc.args;
+    if (typeof toolArgs === "string") {
+      try {
+        toolArgs = JSON.parse(toolArgs);
+      } catch {
+        toolArgs = {};
+      }
+    }
+    if (!toolArgs || typeof toolArgs !== "object") {
+      toolArgs = {};
+    }
+
+    const rawResult = await Promise.race([
+      executeTool(cleanName, toolArgs, context),
+      new Promise((_, reject) =>
+        setTimeout(
+          () =>
+            reject(
+              new Error(
+                `Tool '${cleanName}' execution timed out after ${timeoutMs}ms`,
+              ),
+            ),
+          timeoutMs,
+        ),
+      ),
+    ]);
+
+    let responsePayload;
+    if (rawResult?.isConsequential && rawResult?.requiresConfirmation) {
+      responsePayload = {
+        status: "STAGED_FOR_APPROVAL",
+        requiresConfirmation: true,
+        actionId: rawResult.actionId,
+        actionType: rawResult.actionType,
+        summary: rawResult.summary,
+        message:
+          rawResult.message ||
+          "Action has been staged for human confirmation. An interactive approval card has been displayed to the employee. Awaiting user approval.",
+      };
+    } else if (cleanName === "searchPolicies") {
+      responsePayload = {
+        tool: "searchPolicies",
+        isGrounded: Boolean(rawResult.isGrounded),
+        chunksCount: (rawResult.chunks || []).length,
+        policyEvidence: rawResult.contextBlock || "No matching policies found.",
+        ...(rawResult.fallbackMessage
+          ? { fallbackMessage: rawResult.fallbackMessage }
+          : {}),
+      };
+    } else if (typeof rawResult === "object" && rawResult !== null) {
+      responsePayload = rawResult;
+    } else {
+      responsePayload = { result: rawResult };
+    }
+
+    return {
+      name: cleanName,
+      rawName,
+      id: fc.id,
+      response: responsePayload,
+      rawResult,
+    };
+  } catch (err) {
+    console.error(
+      `🚨 [Orchestrator] Error executing tool '${cleanName}': ${err.message}`,
+    );
+    return {
+      name: cleanName,
+      rawName,
+      id: fc.id,
+      response: {
+        error: true,
+        message: err.message || `Failed to execute ${cleanName}`,
+      },
+      rawResult: null,
+    };
+  }
+}
+
+/**
+ * Controlled Gemini Native Function Calling Execution Loop
+ *
+ * 1. Sends user message & conversation history to Gemini with tool definitions.
+ * 2. Inspects model response for function calls (response.functionCalls).
+ * 3. Validates requested tool names against backend registry.
+ * 4. Executes safe tools concurrently (Promise.all) and mutation/consequential tools sequentially.
+ * 5. Returns structured function responses to Gemini.
+ * 6. Bounds loop to maxRounds (3) to prevent infinite loops.
+ * 7. Streams final natural language response tokens via SSE.
+ *
+ * @param {Object} params
+ * @param {Array} params.contents Formatted Gemini contents array
+ * @param {string} params.systemInstruction System instruction string
+ * @param {Object} params.user Authenticated user
+ * @param {Object} [params.redisClient] Redis client instance
+ * @param {Function} [params.customEmbeddingProvider] Custom embedding provider
+ * @param {Object} [params.qdrantClient] Custom Qdrant client
+ * @param {boolean} [params.stream=false] Whether to stream tokens
+ * @param {Function} [params.onEvent] SSE event callback: (eventName, data) => void
+ * @param {number} [params.maxRounds=3] Maximum function calling rounds
+ * @returns {Promise<Object>} Loop result
+ */
+export async function runNativeFunctionCallingLoop({
+  contents,
+  systemInstruction,
+  user,
+  redisClient = getRedisClient(),
+  customEmbeddingProvider = null,
+  qdrantClient = null,
+  stream = false,
+  onEvent = null,
+  maxRounds = 3,
+}) {
+  const currentContents = [...contents];
+  const intermediateTurns = [];
+  const executedTools = [];
+  const chunks = [];
+  let isGrounded = true;
+  let suggestedAction = null;
+  let stagedAction = null;
+  const totalUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+  let finalAnswer = "";
+
+  for (let round = 1; round <= maxRounds; round++) {
+    console.log(`  [NativeToolLoop] Starting round ${round}/${maxRounds}...`);
+
+    // Call Gemini with available tool declarations
+    const geminiResult = await callGemini({
+      contents: currentContents,
+      systemInstruction,
+      tools: TOOL_DEFINITIONS,
+      stream: false,
+    });
+
+    if (geminiResult.usageMetadata) {
+      totalUsage.promptTokens += geminiResult.usageMetadata.promptTokens || 0;
+      totalUsage.completionTokens +=
+        geminiResult.usageMetadata.completionTokens || 0;
+      totalUsage.totalTokens += geminiResult.usageMetadata.totalTokens || 0;
+    }
+
+    const functionCalls = geminiResult.functionCalls || [];
+
+    // If model did not predict any function calls, it returned the final text answer
+    if (!functionCalls || functionCalls.length === 0) {
+      console.log(
+        `  [NativeToolLoop] No function calls in round ${round}. Final response received.`,
+      );
+      finalAnswer = geminiResult.text || "";
+
+      // Stream tokens to SSE callback if streaming requested
+      if (stream && typeof onEvent === "function" && finalAnswer) {
+        emitTokensToStream(finalAnswer, onEvent);
+      }
+      break;
+    }
+
+    console.log(
+      `  [NativeToolLoop] Round ${round}: Model invoked ${functionCalls.length} tool(s): [${functionCalls.map((fc) => fc.name).join(", ")}]`,
+    );
+
+    // 1. Record Model Turn containing the function calls
+    // IMPORTANT: Preserve the exact candidateContent returned by the model
+    // (including thoughtSignature on functionCall parts and reasoning thoughts).
+    // Discarding thoughtSignature causes a 400 INVALID_ARGUMENT error on subsequent turns.
+    const modelTurn = geminiResult.candidateContent
+      ? JSON.parse(JSON.stringify(geminiResult.candidateContent))
+      : {
+          role: "model",
+          parts: functionCalls.map((fc) => ({
+            functionCall: {
+              name: fc.name,
+              args: fc.args || {},
+              ...(fc.id ? { id: fc.id } : {}),
+            },
+          })),
+        };
+    currentContents.push(modelTurn);
+    intermediateTurns.push(modelTurn);
+
+    // 2. Emit 'tool_call' status events
+    if (typeof onEvent === "function") {
+      for (const fc of functionCalls) {
+        const cleanName = (fc.name || "")
+          .replace(/^default_api:/, "")
+          .replace(/^.*:/, "");
+        onEvent("tool_call", {
+          tool: cleanName,
+          status: getToolStatusMessage(cleanName, fc.args),
+          timestamp: new Date().toISOString(),
+        });
+      }
+    }
+
+    // 3. Execute tools respecting concurrency constraints:
+    // Safe read-only tools run in parallel; mutation and consequential tools run sequentially.
+    const isAllSafe = functionCalls.every((fc) => {
+      const cleanName = (fc.name || "")
+        .replace(/^default_api:/, "")
+        .replace(/^.*:/, "");
+      return SAFE_TOOLS.includes(cleanName);
+    });
+    let toolResults = [];
+
+    const toolContext = {
+      user,
+      redisClient,
+      embeddingProvider: customEmbeddingProvider,
+      qdrantClient,
+    };
+
+    if (isAllSafe) {
+      console.log(
+        `  [NativeToolLoop] Executing ${functionCalls.length} safe tool(s) concurrently in parallel...`,
+      );
+      toolResults = await Promise.all(
+        functionCalls.map((fc) => executeSingleToolCall(fc, toolContext)),
+      );
+    } else {
+      console.log(
+        `  [NativeToolLoop] Executing ${functionCalls.length} tool(s) sequentially (includes mutation or consequential actions)...`,
+      );
+      for (const fc of functionCalls) {
+        const res = await executeSingleToolCall(fc, toolContext);
+        toolResults.push(res);
+      }
+    }
+
+    // 4. Process execution results and extract metadata
+    for (const res of toolResults) {
+      if (!executedTools.includes(res.name)) {
+        executedTools.push(res.name);
+      }
+
+      if (res.rawResult) {
+        // HITL Consequential Action Staged
+        if (
+          res.rawResult.isConsequential &&
+          res.rawResult.requiresConfirmation
+        ) {
+          stagedAction = {
+            actionId: res.rawResult.actionId,
+            type: res.rawResult.actionType,
+            card: res.rawResult.card,
+            summary: res.rawResult.summary,
+          };
+          if (typeof onEvent === "function") {
+            console.log(
+              `  [NativeToolLoop] Emitting 'action_required' event for staged action: ${stagedAction.actionId}`,
+            );
+            onEvent("action_required", stagedAction);
+          }
+        }
+
+        // Policy RAG Evidence Retrieval
+        if (res.name === "searchPolicies") {
+          if (
+            Array.isArray(res.rawResult.chunks) &&
+            res.rawResult.chunks.length > 0
+          ) {
+            chunks.push(...res.rawResult.chunks);
+          }
+          isGrounded = Boolean(res.rawResult.isGrounded);
+          if (res.rawResult.suggestedAction) {
+            suggestedAction = res.rawResult.suggestedAction;
+          }
+        }
+      }
+    }
+
+    // 5. Record User Turn containing the function responses
+    const userParts = toolResults.map((tr) => ({
+      functionResponse: {
+        name: tr.rawName || tr.name,
+        response: tr.response,
+        ...(tr.id ? { id: tr.id } : {}),
+      },
+    }));
+    const userTurn = { role: "user", parts: userParts };
+    currentContents.push(userTurn);
+    intermediateTurns.push(userTurn);
+
+    // 6. If we have reached max rounds, force final response synthesis without tools
+    if (round === maxRounds) {
+      console.log(
+        `  [NativeToolLoop] Reached max rounds (${maxRounds}). Requesting final response without tools...`,
+      );
+      const finalResult = await callGemini({
+        contents: currentContents,
+        systemInstruction,
+        tools: null,
+        stream: false,
+      });
+
+      finalAnswer = finalResult.text || "";
+      if (finalResult.usageMetadata) {
+        totalUsage.promptTokens += finalResult.usageMetadata.promptTokens || 0;
+        totalUsage.completionTokens +=
+          finalResult.usageMetadata.completionTokens || 0;
+        totalUsage.totalTokens += finalResult.usageMetadata.totalTokens || 0;
+      }
+      if (stream && typeof onEvent === "function" && finalAnswer) {
+        emitTokensToStream(finalAnswer, onEvent);
+      }
+      break;
+    }
+  }
+
+  // Fallback for ungrounded policy searches where model returned minimal text
+  if (
+    !isGrounded &&
+    executedTools.includes("searchPolicies") &&
+    (!finalAnswer || finalAnswer.trim().length < 5)
+  ) {
+    finalAnswer =
+      "No company policy covers this topic. Would you like me to raise an HR or IT ticket for assistance?";
+    if (stream && typeof onEvent === "function") {
+      onEvent("token", { delta: finalAnswer });
+    }
+  }
+
+  return {
+    text: finalAnswer,
+    chunks,
+    isGrounded,
+    suggestedAction,
+    stagedAction,
+    intermediateTurns,
+    executedTools,
+    usageMetadata: totalUsage.totalTokens > 0 ? totalUsage : null,
+  };
+}
+
+/**
  * Shared post-processing for both streaming and non-streaming copilot turns:
  * Unmasks PII, packages citations, updates session history, and logs audit events.
  *
@@ -966,6 +1566,7 @@ async function finalizeTurn({
   hasPII,
   chunks = [],
   historyTurns = [],
+  intermediateTurns = [],
   detectedTool = null,
   stagedAction = null,
   usageMetadata = null,
@@ -992,15 +1593,42 @@ async function finalizeTurn({
     userId: user?.userId,
   };
 
+  // User input turn
   await appendSessionMessage(
     sessionTarget,
-    { role: "user", text: rawMessage },
+    {
+      role: "user",
+      text: rawMessage,
+      parts: [{ text: rawMessage }],
+    },
     redisClient,
     user,
   );
+
+  // Intermediate function calls and function response turns (if any)
+  if (Array.isArray(intermediateTurns) && intermediateTurns.length > 0) {
+    for (const interTurn of intermediateTurns) {
+      await appendSessionMessage(
+        sessionTarget,
+        {
+          role: interTurn.role,
+          text: interTurn.text || "",
+          parts: interTurn.parts,
+        },
+        redisClient,
+        user,
+      );
+    }
+  }
+
+  // Model final response turn
   await appendSessionMessage(
     sessionTarget,
-    { role: "model", text: unmaskedAnswer },
+    {
+      role: "model",
+      text: unmaskedAnswer,
+      parts: [{ text: unmaskedAnswer }],
+    },
     redisClient,
     user,
   );
@@ -1047,7 +1675,8 @@ async function finalizeTurn({
     activeCitations: packaged.activeCitations,
     suggestedAction: stagedAction ? null : suggestedAction,
     stagedAction: stagedAction || null,
-    totalHistoryTurns: historyTurns.length + 2,
+    totalHistoryTurns:
+      historyTurns.length + 2 + (intermediateTurns?.length || 0),
     usage: usageMetadata || null,
   };
 }
@@ -1100,90 +1729,83 @@ export async function runCopilotTurn({
     user,
   );
 
-  // 3. Tool Intent Evaluation
-  const detectedTool = detectToolIntent(message);
-  if (detectedTool && detectedTool.tool !== "searchPolicies") {
-    const { text, stagedAction } = await executeToolIntent({
-      detectedTool,
+  // 4. Custom Mock LLM Provider Path (preserves test harness compatibility)
+  if (typeof customLlmProvider === "function") {
+    const retrievalResult = await retrievePolicyContext({
+      query: maskedText,
       user,
-      redisClient,
-      customEmbeddingProvider,
+      embeddingProvider: customEmbeddingProvider,
       qdrantClient,
     });
 
-    return await finalizeTurn({
-      sessionId,
+    const systemInstruction = buildSystemInstructions({
       user,
-      rawMessage: message,
-      rawAnswerText: text,
-      tokenMap,
-      hasPII,
-      chunks: [],
-      historyTurns,
-      detectedTool,
-      stagedAction,
-      isGrounded: true,
-      redisClient,
+      evidenceContext: retrievalResult.contextBlock,
     });
-  }
 
-  // 4. Evidence-Based RAG Retrieval
-  const retrievalResult = await retrievePolicyContext({
-    query: maskedText,
-    user,
-    embeddingProvider: customEmbeddingProvider,
-    qdrantClient,
-  });
-
-  // 5. Assemble System Prompt
-  const systemInstruction = buildSystemInstructions({
-    user,
-    evidenceContext: retrievalResult.contextBlock,
-  });
-
-  let responseText = "";
-  let usageMetadata = null;
-
-  if (typeof customLlmProvider === "function") {
-    responseText = await customLlmProvider({
+    let responseText = await customLlmProvider({
       message: maskedText,
       history: historyTurns,
       systemInstruction,
       retrievalResult,
       tokenMap,
     });
-  } else {
-    const contents = formatGeminiContents(historyTurns, maskedText);
-    const geminiResult = await callGemini({
-      contents,
-      systemInstruction,
-      stream: false,
+
+    if (
+      !retrievalResult.isGrounded &&
+      (!responseText || responseText.length < 5)
+    ) {
+      responseText = retrievalResult.fallbackMessage;
+    }
+
+    return await finalizeTurn({
+      sessionId,
+      user,
+      rawMessage: message,
+      rawAnswerText: responseText,
+      tokenMap,
+      hasPII,
+      chunks: retrievalResult.chunks,
+      historyTurns,
+      detectedTool: null,
+      isGrounded: retrievalResult.isGrounded,
+      suggestedAction: retrievalResult.suggestedAction || null,
+      redisClient,
     });
-    responseText = geminiResult.text;
-    usageMetadata = geminiResult.usageMetadata;
   }
 
-  // Ungrounded fallback check
-  if (
-    !retrievalResult.isGrounded &&
-    (!responseText || responseText.length < 5)
-  ) {
-    responseText = retrievalResult.fallbackMessage;
-  }
+  // 5. Native Gemini Function Calling Lifecycle
+  const systemInstruction = buildSystemInstructions({ user });
+  const contents = formatGeminiContents(historyTurns, maskedText);
+
+  const loopResult = await runNativeFunctionCallingLoop({
+    contents,
+    systemInstruction,
+    user,
+    redisClient,
+    customEmbeddingProvider,
+    qdrantClient,
+    stream: false,
+  });
 
   return await finalizeTurn({
     sessionId,
     user,
     rawMessage: message,
-    rawAnswerText: responseText,
+    rawAnswerText: loopResult.text,
     tokenMap,
     hasPII,
-    chunks: retrievalResult.chunks,
+    chunks: loopResult.chunks,
     historyTurns,
-    detectedTool,
-    usageMetadata,
-    isGrounded: retrievalResult.isGrounded,
-    suggestedAction: retrievalResult.suggestedAction || null,
+    intermediateTurns: loopResult.intermediateTurns,
+    detectedTool:
+      loopResult.executedTools.length > 0
+        ? { tool: loopResult.executedTools[0] }
+        : null,
+    stagedAction: loopResult.stagedAction,
+    usageMetadata: loopResult.usageMetadata,
+    isGrounded: loopResult.isGrounded,
+    suggestedAction: loopResult.suggestedAction,
     redisClient,
   });
 }
@@ -1207,7 +1829,7 @@ export async function runCopilotTurn({
  * @param {Function} [params.customEmbeddingProvider] Optional custom embedding provider
  * @param {Object} [params.qdrantClient] Optional custom Qdrant client
  * @param {Object} [params.redisClient] Optional custom Redis client
- * @param {Object} [params.explicitToolCall] Optional direct tool trigger from client
+ * @param {Object} [params.explicitToolCall] Deprecated direct tool trigger (ignored in production)
  * @returns {Promise<Object>} Final turn summary
  */
 export async function streamCopilotTurn({
@@ -1222,7 +1844,9 @@ export async function streamCopilotTurn({
   explicitToolCall = null,
 }) {
   const turnStartTime = Date.now();
-  console.log(`\n▶️ [Orchestrator:streamCopilotTurn] Initializing turn for session: '${sessionId}' | User: ${user?.userId} (${user?.role}) | Org: ${user?.orgId}`);
+  console.log(
+    `\n▶️ [Orchestrator:streamCopilotTurn] Initializing turn for session: '${sessionId}' | User: ${user?.userId} (${user?.role}) | Org: ${user?.orgId}`,
+  );
 
   if (!sessionId) {
     console.error(`❌ [Orchestrator:streamCopilotTurn] Missing sessionId.`);
@@ -1233,175 +1857,151 @@ export async function streamCopilotTurn({
     throw new Error("User message is required.");
   }
   if (!user || !user.orgId || !user.userId) {
-    console.error(`❌ [Orchestrator:streamCopilotTurn] Incomplete user context:`, user);
+    console.error(
+      `❌ [Orchestrator:streamCopilotTurn] Incomplete user context:`,
+      user,
+    );
     throw new Error(
       "Authenticated user context with orgId and userId is required.",
     );
   }
   if (typeof onEvent !== "function") {
-    console.error(`❌ [Orchestrator:streamCopilotTurn] Missing onEvent callback.`);
+    console.error(
+      `❌ [Orchestrator:streamCopilotTurn] Missing onEvent callback.`,
+    );
     throw new Error("onEvent callback function is required for SSE streaming.");
   }
 
   // 1. Validate Session Ownership & Isolation
-  console.log(`  [Step 1/6] Validating session ownership in orchestrator...`);
+  console.log(`  [Step 1/5] Validating session ownership in orchestrator...`);
   await validateSessionOwnership({ sessionId, user, client: redisClient });
-  console.log(`  [Step 1/6] Session ownership validated.`);
+  console.log(`  [Step 1/5] Session ownership validated.`);
 
   // 2. Pre-LLM PII Masking
-  console.log(`  [Step 2/6] Running PII masking on input prompt...`);
+  console.log(`  [Step 2/5] Running PII masking on input prompt...`);
   const { maskedText, tokenMap, hasPII } = maskPII(message);
-  console.log(`  [Step 2/6] PII masking complete. hasPII: ${hasPII}, entities masked: ${Object.keys(tokenMap).length}`);
+  console.log(
+    `  [Step 2/5] PII masking complete. hasPII: ${hasPII}, entities masked: ${Object.keys(tokenMap).length}`,
+  );
 
   // 3. Load Multi-Turn History (scoped by orgId + userId + sessionId)
-  console.log(`  [Step 3/6] Loading sliding-window session history from Redis...`);
+  console.log(
+    `  [Step 3/5] Loading sliding-window session history from Redis...`,
+  );
   const sessionTarget = { sessionId, orgId: user.orgId, userId: user.userId };
   const historyTurns = await getSessionHistory(
     sessionTarget,
     redisClient,
     user,
   );
-  console.log(`  [Step 3/6] Retrieved ${historyTurns.length} history turn(s).`);
+  console.log(`  [Step 3/5] Retrieved ${historyTurns.length} history turn(s).`);
 
-  let accumulatedText = "";
-  let stagedActionPayload = null;
-  let usageMetadata = null;
-  let chunks = [];
-  let isGrounded = true;
-  let suggestedAction = null;
-
-  // 4. Tool Intent Evaluation
-  const detectedTool = explicitToolCall || detectToolIntent(message);
-  console.log(`  [Step 4/6] Intent Detection result: ${detectedTool ? `${detectedTool.tool} (explicit: ${Boolean(explicitToolCall)})` : 'None -> RAG Policy Search'}`);
-
-  if (detectedTool && detectedTool.tool !== "searchPolicies") {
-    console.log(`  [Step 4/6] Executing tool intent '${detectedTool.tool}' with args:`, JSON.stringify(detectedTool.args || {}));
-    onEvent("tool_call", {
-      tool: detectedTool.tool,
-      status: `Executing: ${detectedTool.tool}...`,
-      timestamp: new Date().toISOString(),
-    });
-
-    try {
-      const toolStartTime = Date.now();
-      const { text, stagedAction } = await executeToolIntent({
-        detectedTool,
-        user,
-        redisClient,
-        customEmbeddingProvider,
-        qdrantClient,
-      });
-
-      stagedActionPayload = stagedAction;
-      accumulatedText = text;
-      console.log(`  [Step 4/6] Tool '${detectedTool.tool}' executed in ${Date.now() - toolStartTime}ms | Result length: ${text?.length || 0} | StagedAction: ${stagedAction ? stagedAction.actionId : 'none'}`);
-
-      if (stagedActionPayload) {
-        console.log(`  [Step 4/6] Staged action generated: ${stagedActionPayload.actionId} (${stagedActionPayload.type})`);
-        onEvent("action_required", stagedActionPayload);
-      }
-
-      onEvent("token", { delta: accumulatedText });
-    } catch (toolErr) {
-      console.error(`❌ [Orchestrator:streamCopilotTurn] Tool execution error (${detectedTool.tool}):`, toolErr.message);
-      accumulatedText = `⚠️ Error executing ${detectedTool.tool}: ${toolErr.message}`;
-      onEvent("token", { delta: accumulatedText });
-    }
-  } else {
-    // 4. Semantic Policy Search (Evidence-Based RAG)
-    const ragQuery = (detectedTool && detectedTool.args?.query) || maskedText;
-    console.log(`  [Step 4/6] Starting Qdrant RAG policy retrieval for query: "${ragQuery.substring(0, 80)}..."`);
+  // 4. Custom Mock LLM Stream Provider Path (preserves test harness compatibility)
+  if (typeof customLlmStreamProvider === "function") {
+    console.log(`  [Step 4/5] Using custom mock LLM stream provider.`);
     onEvent("tool_call", {
       tool: "searchPolicies",
       status: "Searching ABC Tech policy knowledge base in Qdrant...",
       timestamp: new Date().toISOString(),
     });
 
-    const ragStartTime = Date.now();
     const retrievalResult = await retrievePolicyContext({
-      query: ragQuery,
+      query: maskedText,
       user,
       embeddingProvider: customEmbeddingProvider,
       qdrantClient,
     });
 
-    chunks = retrievalResult?.chunks || [];
-    isGrounded = retrievalResult?.isGrounded ?? false;
-    suggestedAction = retrievalResult?.suggestedAction || null;
-
-    console.log(`  [Step 4/6] Qdrant search completed in ${Date.now() - ragStartTime}ms | Chunks: ${chunks.length} | Grounded: ${isGrounded} | Highest Score: ${retrievalResult?.highestScore ?? 0}`);
-    if (chunks.length > 0) {
-      console.log(`  [Step 4/6] Top sources: ${chunks.slice(0, 3).map(c => `[${c.documentName || 'Policy'} § ${c.sectionTitle || 'General'} (${((c.score || 0) * 100).toFixed(0)}%)]`).join(', ')}`);
-    }
-
     const systemInstruction = buildSystemInstructions({
       user,
-      evidenceContext: retrievalResult?.contextBlock || "",
+      evidenceContext: retrievalResult.contextBlock,
     });
 
-    // 5. Generate stream from LLM
-    console.log(`  [Step 5/6] Generating response with LLM (Model: ${PRIMARY_MODEL}, Streaming: true)...`);
-    const llmStartTime = Date.now();
-    let streamTokenCount = 0;
+    let accumulatedText = "";
+    await customLlmStreamProvider({
+      message: maskedText,
+      history: historyTurns,
+      systemInstruction,
+      retrievalResult,
+      tokenMap,
+      emitToken: (delta) => {
+        accumulatedText += delta;
+        onEvent("token", { delta });
+      },
+    });
 
-    if (typeof customLlmStreamProvider === "function") {
-      console.log(`  [Step 5/6] Using custom mock LLM stream provider.`);
-      await customLlmStreamProvider({
-        message: maskedText,
-        history: historyTurns,
-        systemInstruction,
-        retrievalResult,
-        tokenMap,
-        emitToken: (delta) => {
-          accumulatedText += delta;
-          streamTokenCount++;
-          onEvent("token", { delta });
-        },
-      });
-    } else {
-      const contents = formatGeminiContents(historyTurns, maskedText);
-      console.log(`  [Step 5/6] Formatted ${contents.length} contents item(s) for Gemini.`);
+    const finalSummary = await finalizeTurn({
+      sessionId,
+      user,
+      rawMessage: message,
+      rawAnswerText: accumulatedText,
+      tokenMap,
+      hasPII,
+      chunks: retrievalResult.chunks,
+      historyTurns,
+      detectedTool: { tool: "searchPolicies" },
+      isGrounded: retrievalResult.isGrounded,
+      suggestedAction: retrievalResult.suggestedAction || null,
+      redisClient,
+    });
 
-      const geminiResult = await callGemini({
-        contents,
-        systemInstruction,
-        stream: true,
-        onToken: (delta) => {
-          accumulatedText += delta;
-          streamTokenCount++;
-          onEvent("token", { delta });
-        },
-      });
+    onEvent("citation", {
+      hasCitations: finalSummary.hasCitations,
+      citations: finalSummary.citations,
+      activeCitations: finalSummary.activeCitations,
+    });
 
-      usageMetadata = geminiResult.usageMetadata;
-    }
+    onEvent("done", {
+      sessionId,
+      totalHistoryTurns: finalSummary.totalHistoryTurns,
+      hasCitations: finalSummary.hasCitations,
+      hasActionRequired: false,
+      completedAt: new Date().toISOString(),
+    });
 
-    console.log(`  [Step 5/6] LLM generation complete in ${Date.now() - llmStartTime}ms | Streamed ${streamTokenCount} token chunk(s) | Output: ${accumulatedText.length} chars`);
-    if (usageMetadata) {
-      console.log(`  [Step 5/6] Token usage: promptTokens=${usageMetadata.promptTokenCount}, candidateTokens=${usageMetadata.candidatesTokenCount}`);
-    }
+    return finalSummary;
   }
 
+  // 5. Native Gemini Function Calling Lifecycle
+  console.log(`  [Step 4/5] Running Gemini Native Function Calling loop...`);
+  const systemInstruction = buildSystemInstructions({ user });
+  const contents = formatGeminiContents(historyTurns, maskedText);
+
+  const loopResult = await runNativeFunctionCallingLoop({
+    contents,
+    systemInstruction,
+    user,
+    redisClient,
+    customEmbeddingProvider,
+    qdrantClient,
+    stream: true,
+    onEvent,
+  });
+
   // 6. Finalize Turn
-  console.log(`  [Step 6/6] Finalizing turn, unmasking PII, recording audit log, and persisting to Redis...`);
+  console.log(
+    `  [Step 5/5] Finalizing turn, unmasking PII, recording audit log, and persisting to Redis...`,
+  );
   const finalSummary = await finalizeTurn({
     sessionId,
     user,
     rawMessage: message,
-    rawAnswerText: accumulatedText,
+    rawAnswerText: loopResult.text,
     tokenMap,
     hasPII,
-    chunks,
+    chunks: loopResult.chunks,
     historyTurns,
-    detectedTool,
-    stagedAction: stagedActionPayload,
-    usageMetadata,
-    isGrounded,
-    suggestedAction,
+    intermediateTurns: loopResult.intermediateTurns,
+    detectedTool:
+      loopResult.executedTools.length > 0
+        ? { tool: loopResult.executedTools[0] }
+        : null,
+    stagedAction: loopResult.stagedAction,
+    usageMetadata: loopResult.usageMetadata,
+    isGrounded: loopResult.isGrounded,
+    suggestedAction: loopResult.suggestedAction,
     redisClient,
   });
-
-  console.log(`  [Step 6/6] Turn finalized | Citations: ${finalSummary.citations?.length || 0} | Grounded: ${finalSummary.isGrounded}`);
 
   // 7. Emit Citation Drawer Event
   onEvent("citation", {
@@ -1415,12 +2015,14 @@ export async function streamCopilotTurn({
     sessionId,
     totalHistoryTurns: finalSummary.totalHistoryTurns,
     hasCitations: finalSummary.hasCitations,
-    hasActionRequired: Boolean(stagedActionPayload),
+    hasActionRequired: Boolean(loopResult.stagedAction),
     completedAt: new Date().toISOString(),
-    usage: usageMetadata || undefined,
+    usage: loopResult.usageMetadata || undefined,
   });
 
-  console.log(`✅ [Orchestrator:streamCopilotTurn] Turn successfully finished in ${Date.now() - turnStartTime}ms for session: '${sessionId}'\n`);
+  console.log(
+    `✅ [Orchestrator:streamCopilotTurn] Turn successfully finished in ${Date.now() - turnStartTime}ms for session: '${sessionId}'\n`,
+  );
 
   return finalSummary;
 }

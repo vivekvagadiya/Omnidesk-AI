@@ -14,7 +14,7 @@ export function useAuditLogsQuery({ action, actorId, limit = 50, enabled = true 
     queryFn: ({ signal }) => auditService.getAuditLogs(filters, { signal }),
     enabled: Boolean(user?.userId) && enabled,
     placeholderData: keepPreviousData,
-    refetchInterval: enabled ? 4000 : false,
+    refetchInterval: enabled ? 60000 : false,
     meta: { errorTitle: 'Could not fetch audit logs' },
   });
 }

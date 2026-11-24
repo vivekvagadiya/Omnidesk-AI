@@ -17,6 +17,47 @@ import {
 
 const CopilotContext = createContext(null);
 
+function formatUserFacingError(raw) {
+  if (!raw) return 'The AI assistant is temporarily unavailable. Please try again.';
+  let msg = typeof raw === 'string' ? raw : raw?.message || '';
+
+  if (typeof msg === 'string') {
+    const trimmed = msg.trim();
+    if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (parsed.error?.message) {
+          msg = parsed.error.message;
+        }
+      } catch {
+        // not valid JSON
+      }
+    }
+  }
+
+  const lower = (msg || '').toLowerCase();
+  if (
+    lower.includes('quota') ||
+    lower.includes('429') ||
+    lower.includes('resource_exhausted') ||
+    lower.includes('requests per day')
+  ) {
+    return 'The AI assistant is currently experiencing high demand or quota limits. Please try again in a few moments.';
+  }
+  if (
+    lower.includes('503') ||
+    lower.includes('high demand') ||
+    lower.includes('unavailable')
+  ) {
+    return 'The AI assistant is temporarily busy due to high demand. Please try again shortly.';
+  }
+  if (lower.includes('timeout') || lower.includes('timed out')) {
+    return 'The request took too long to complete. Please try again.';
+  }
+
+  return msg;
+}
+
 export function CopilotProvider({ children }) {
   const { user } = useAuth();
 
@@ -178,6 +219,7 @@ export function CopilotProvider({ children }) {
           } else if (event === 'error') {
             setActiveToolPill(null);
             setIsStreaming(false);
+            const userError = formatUserFacingError(payload?.message);
             setMessages((prev) =>
               prev.map((msg) =>
                 msg.id === assistantMessageId
@@ -185,18 +227,19 @@ export function CopilotProvider({ children }) {
                       ...msg,
                       text:
                         (msg.text ? msg.text + '\n\n' : '') +
-                        `*(Error: ${payload.message || 'Stream turn encountered an issue.'})*`,
+                        `*(Error: ${userError})*`,
                     }
                   : msg
               )
             );
             toast.error('Response Error', {
-              description: payload.message || 'Error occurred while streaming response.',
+              description: userError,
             });
           }
         },
       });
     } catch (err) {
+      const userError = formatUserFacingError(err?.message);
       setMessages((prev) =>
         prev.map((msg) =>
           msg.id === assistantMessageId
@@ -204,12 +247,12 @@ export function CopilotProvider({ children }) {
                 ...msg,
                 text:
                   msg.text ||
-                  `Sorry, I encountered an issue connecting to the assistant: ${err.message}`,
+                  `Sorry, I encountered an issue connecting to the assistant: ${userError}`,
               }
             : msg
         )
       );
-      toast.error('Connection Failed', { description: err.message });
+      toast.error('Connection Failed', { description: userError });
     } finally {
       setIsStreaming(false);
       setActiveToolPill(null);

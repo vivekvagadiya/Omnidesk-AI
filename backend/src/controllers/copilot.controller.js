@@ -3,6 +3,8 @@ import {
   streamCopilotTurn,
   validateSessionOwnership,
   SessionOwnershipError,
+  AiProviderError,
+  sanitizeAiErrorMessage,
 } from '../services/ai/orchestrator.service.js';
 import {
   consumeActionToken,
@@ -26,7 +28,7 @@ import { recordAuditLog } from '../services/audit/audit.service.js';
  */
 export async function streamChat(req, res, next) {
   const startTime = Date.now();
-  const { message, sessionId, toolCall } = req.body;
+  const { message, sessionId } = req.body;
   const user = req.user;
 
   console.log(`\n💬 [Copilot Controller] Processing chat stream request...`);
@@ -71,13 +73,13 @@ export async function streamChat(req, res, next) {
     const statusCode = err.statusCode || 500;
     return errorResponse(res, {
       statusCode,
-      message: err.message || 'Failed to validate session ownership.',
+      message: sanitizeAiErrorMessage(err),
     });
   }
 
   const msgLength = message.trim().length;
   console.log(
-    `💬 [Copilot Controller] Turn started | Org: ${user.orgId} | User: ${user.userId} | Role: ${user.role} | Session: ${activeSessionId} | Length: ${msgLength} chars | ToolCall: ${toolCall ? JSON.stringify(toolCall) : 'none'}`
+    `💬 [Copilot Controller] Turn started | Org: ${user.orgId} | User: ${user.userId} | Role: ${user.role} | Session: ${activeSessionId} | Length: ${msgLength} chars`
   );
 
   // Initialize SSE connection headers
@@ -120,26 +122,37 @@ export async function streamChat(req, res, next) {
           sendSSE(res, event, data);
         }
       },
-      explicitToolCall: toolCall || null,
     });
   } catch (err) {
     console.error(`\n❌ [Copilot Controller] Error during stream:`, {
-      message: err.message,
+      message: err.originalError?.message || err.message,
       name: err.name,
       statusCode: err.statusCode,
-      stack: err.stack,
+      stack: err.originalError?.stack || err.stack,
     });
+
+    const isSessionErr =
+      err instanceof SessionOwnershipError || err.statusCode === 403;
+    const userMessage = isSessionErr
+      ? (err.message || 'Forbidden: Session does not belong to the authenticated user.')
+      : sanitizeAiErrorMessage(err);
+
+    const statusCode = isSessionErr
+      ? 403
+      : (typeof err.statusCode === 'number' && err.statusCode >= 400 && err.statusCode < 600
+          ? err.statusCode
+          : 500);
+
     if (!res.headersSent) {
-      const statusCode = (err instanceof SessionOwnershipError || err.statusCode === 403) ? 403 : 500;
       return errorResponse(res, {
         statusCode,
-        message: err.message || 'An error occurred during chat turn execution.',
+        message: userMessage,
       });
     }
 
     sendSSE(res, 'error', {
-      message: err.message || 'Internal streaming error.',
-      code: 'COPILOT_STREAM_ERROR',
+      message: userMessage,
+      code: err.code || 'COPILOT_STREAM_ERROR',
     });
   } finally {
     const totalElapsed = Date.now() - startTime;
@@ -390,9 +403,10 @@ export async function uploadDocument(req, res) {
       });
     }
 
+    console.error(`❌ [Copilot Controller] Document ingestion error:`, err);
     return errorResponse(res, {
       statusCode: 500,
-      message: err.message || 'An error occurred during document ingestion.',
+      message: sanitizeAiErrorMessage(err),
     });
   }
 }
